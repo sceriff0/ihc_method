@@ -53,17 +53,21 @@ annotations.
 ## Load annotations and assign cells (sf point-in-polygon)
 
 ```{r annotations}
-# Only need annotations for patients the pathologist scored.
-neo_ids <- norm_id(neoplastic_data$SAMPLE)
+# IHC, neoplastic and geojson all live in the SLIDE-id space (numeric codes).
+neo_ids <- norm_slide_id(neoplastic_data$SAMPLE)
 annots  <- load_annotations(patient_ids = neoplastic_data$SAMPLE)
 
 cat("annotation polygons loaded:", nrow(annots),
     "for", dplyr::n_distinct(annots$patient_id), "patients\n")
 
-ihc_ids    <- unique(norm_id(ihc_data$patient_id))
-shared_ids <- intersect(neo_ids, ihc_ids)
-cat("patients with BOTH IHC cells and pathologist score:", length(shared_ids), "\n")
-if (length(shared_ids) == 0)
+ihc_ids       <- unique(norm_slide_id(ihc_data$patient_id))
+have_geojson  <- unique(norm_slide_id(annots$patient_id))
+no_geojson    <- setdiff(intersect(neo_ids, ihc_ids), have_geojson)
+cat("patients with BOTH IHC cells and pathologist score:",
+    length(intersect(neo_ids, ihc_ids)), "\n")
+cat("  of which via sf polygons:", length(intersect(neo_ids, have_geojson)),
+    "| via CSV Out_of_annotation fallback:", length(no_geojson), "\n")
+if (length(intersect(neo_ids, ihc_ids)) == 0)
   warning("no overlap between ihc_data patients and neoplastic_data — check IDs")
 ```
 
@@ -77,7 +81,7 @@ ihc_tumor_per_ann <- ihc_annotation_metrics(ihc_data, annots, scope = "per_annot
 ihc_tumor_union   <- ihc_annotation_metrics(ihc_data, annots, scope = "union")
 
 path_long <- neoplastic_data |>
-  mutate(patient_id = norm_id(SAMPLE)) |>
+  mutate(patient_id = norm_slide_id(SAMPLE)) |>
   pivot_longer(starts_with("ANNOTATION_"),
                names_to = "annotation", values_to = "path_pct") |>
   filter(!is.na(path_pct)) |>
@@ -146,8 +150,9 @@ IHC immune infiltrate = CD45+ (and lineage) fractions inside the tumour region
 and `Immuno-phenotype` (categorical).
 
 ```{r infiltrate-join}
+# IHC metrics are slide-space; clinical is keyed to slides via `ID PATIENT`.
 clin <- clinical_data |>
-  mutate(patient_id = norm_id(`ID CRF PRESERVE`)) |>
+  mutate(patient_id = norm_slide_id(`ID PATIENT`)) |>
   select(patient_id,
          hot_score  = any_of("HOT score"),
          immuno_phe = any_of("Immuno-phenotype"))
@@ -211,9 +216,9 @@ ihc_mk <- ihc_marker_fraction(ihc_data) |>
 
 ihc_immune <- full_join(ihc_lin, ihc_mk, by = "patient_id")
 
-# Full clinical table on the shared key. Keep the columns the QC below uses.
+# Full clinical table on the shared key (slide space via `ID PATIENT`).
 clin_full <- clinical_data |>
-  mutate(patient_id = norm_id(`ID CRF PRESERVE`))
+  mutate(patient_id = norm_slide_id(`ID PATIENT`))
 
 ihc_clin <- ihc_immune |> inner_join(clin_full, by = "patient_id")
 cat("patients with whole-slide IHC immune metrics + clinical row:", nrow(ihc_clin), "\n")

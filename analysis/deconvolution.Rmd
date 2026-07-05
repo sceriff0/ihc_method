@@ -64,21 +64,31 @@ cat("expression matrix:", nrow(expr_mat), "genes x", ncol(expr_mat), "samples\n"
 ```{r deconvolve}
 methods <- c("quantiseq", "epic", "mcp_counter", "xcell")
 
+# Bulk RNA samples are in CRF-id space; IHC is slide-id space. Bridge via clinical.
+xwalk <- id_crosswalk(clinical_data)
+
 deconv_long <- NULL
 if (requireNamespace("immunedeconv", quietly = TRUE)) {
   safe_deconv <- purrr::possibly(function(m) {
     immunedeconv::deconvolute(expr_mat, m) |>
-      pivot_longer(-cell_type, names_to = "patient_id", values_to = "score") |>
+      pivot_longer(-cell_type, names_to = "sample", values_to = "score") |>
       mutate(method = m)
   }, otherwise = NULL, quiet = FALSE)
 
   deconv_long <- purrr::map(methods, safe_deconv) |>
     purrr::compact() |>
     bind_rows() |>
-    mutate(patient_id = norm_id(patient_id),
-           lineage    = deconv_to_lineage(cell_type))
+    mutate(crf_id  = norm_id(sample),
+           lineage = deconv_to_lineage(cell_type)) |>
+    left_join(xwalk, by = "crf_id")            # crf_id -> slide_id
+
+  n_unmapped <- deconv_long |> distinct(crf_id, slide_id) |>
+    filter(is.na(slide_id)) |> nrow()
+  deconv_long <- deconv_long |> filter(!is.na(slide_id)) |> rename(patient_id = slide_id)
+
   cat("deconvolution rows:", nrow(deconv_long),
-      "across", dplyr::n_distinct(deconv_long$method), "methods\n")
+      "across", dplyr::n_distinct(deconv_long$method), "methods;",
+      n_unmapped, "RNA sample(s) had no slide crosswalk\n")
 } else {
   message("immunedeconv not installed — install it to run this report.")
 }

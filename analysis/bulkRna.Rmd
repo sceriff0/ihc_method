@@ -36,9 +36,12 @@ multi-gene markers, and correlate bulk expression vs the per-patient fraction of
 ## Per-patient bulk expression of each marker's gene(s)
 
 ```{r marker-expression}
+# RNA samples are CRF-id space; bridge to IHC slide-id space via clinical.
+xwalk <- id_crosswalk(clinical_data)
+
 expr_long <- counts_data |>
-  mutate(patient_id = norm_id(Sample)) |>
-  pivot_longer(-c(Sample, patient_id), names_to = "gene", values_to = "expr")
+  mutate(crf_id = norm_id(Sample)) |>
+  pivot_longer(-c(Sample, crf_id), names_to = "gene", values_to = "expr")
 
 # marker -> its genes, one row per (marker, gene). Explicit $-access + strsplit
 # (no NSE) so it is robust to the base pipe / tidyr separate_rows() quirks.
@@ -52,11 +55,14 @@ if (length(missing)) message("genes absent from RNA matrix: ", paste(missing, co
 # keep only genes present in the RNA matrix
 marker_genes <- gene_rows |> filter(gene %in% unique(expr_long$gene))
 
-# Per patient, average expression across a marker's available genes.
+# Per patient, average expression across a marker's available genes, then map the
+# CRF sample id to the IHC slide id via the crosswalk.
 marker_expr <- expr_long |>
   inner_join(marker_genes, by = "gene", relationship = "many-to-many") |>
-  group_by(marker, patient_id) |>
-  summarise(rna_expr = mean(expr), .groups = "drop")
+  group_by(marker, crf_id) |>
+  summarise(rna_expr = mean(expr), .groups = "drop") |>
+  inner_join(xwalk, by = "crf_id") |>
+  transmute(marker, patient_id = slide_id, rna_expr)
 ```
 
 ## Per-patient IHC positive-cell fraction

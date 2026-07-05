@@ -30,6 +30,35 @@ suppressPackageStartupMessages({
 # kept (they are significant, e.g. "052").
 norm_id <- function(x) toupper(gsub("[^A-Za-z0-9]", "", as.character(x)))
 
+# Normalise a SLIDE-space id (IHC patient_id, neoplastic SAMPLE, clinical
+# `ID PATIENT`). These are numeric slide codes that sometimes carry an alpha
+# prefix (e.g. "EPM - 052"); keep only the digits so "EPM - 052" -> "052" matches
+# the IHC "052". Falls back to norm_id() for any purely non-numeric id.
+norm_slide_id <- function(x) {
+  x <- as.character(x)
+  d <- gsub("[^0-9]", "", x)
+  ifelse(d == "" | is.na(x), norm_id(x), d)
+}
+
+# Crosswalk between the two id systems, read from clinical_data:
+#   slide_id (norm_slide_id of `ID PATIENT`)  <->  crf_id (norm_id of `ID CRF PRESERVE`)
+# `ID CRF PRESERVE` also keys counts_data$Sample, so this bridges IHC/neoplastic
+# (slide space) to bulk RNA (CRF space). `slide_id_fixes` corrects known clinical
+# data-entry errors: the default handles the verified transposition where clinical
+# reads "15879" but the slide/neoplastic id is "15897". Extend or clear as needed.
+id_crosswalk <- function(clinical_data,
+                         patient_col = "ID PATIENT",
+                         crf_col     = "ID CRF PRESERVE",
+                         slide_id_fixes = c("15879" = "15897")) {
+  tibble::tibble(
+    slide_id = norm_slide_id(clinical_data[[patient_col]]),
+    crf_id   = norm_id(clinical_data[[crf_col]])
+  ) |>
+    dplyr::mutate(slide_id = dplyr::recode(slide_id, !!!slide_id_fixes)) |>
+    dplyr::filter(slide_id != "", crf_id != "") |>
+    dplyr::distinct()
+}
+
 # TRUE where a FlowPath `<marker>_sign` column marks a positive cell. The
 # FlowPath export uses "+"; the alternatives guard against encoding drift.
 is_pos <- function(x) {
@@ -179,39 +208,50 @@ region_ratios <- function(cells) {
   )
 }
 
-# Point-in-polygon assignment + region metrics, per patient. `scope`:
-#   "per_annotation" -> one row per (patient, annotation polygon)
-#   "union"          -> one row per patient over the dissolved annotations
-# Cells are matched to their own patient's polygons only. Uses sf::st_within on
-# the raw geojson; the CSV Out_of_annotation flag is ignored by design.
+# TRUE where a FlowPath `Out_of_annotation` value marks a cell OUTSIDE the region.
+.is_outside <- function(x) tolower(trimws(as.character(x))) %in% c("true", "1", "yes", "t")
+
+# Region metrics per patient over ALL IHC patients (slide space). Preference:
+#   patient HAS geojson  -> sf::st_within on the raw polygons (trusted)
+#   patient has NO geojson -> fall back to the CSV `Out_of_annotation` flag
+# `scope`: "per_annotation" (one row per polygon) or "union" (one row per patient
+# over the dissolved polygons). CSV-fallback patients always yield a single row
+# tagged annotation = "csv". A `source` column records sf vs csv provenance.
 ihc_annotation_metrics <- function(ihc_data, annots,
-                                    scope = c("per_annotation", "union")) {
-  scope <- match.arg(scope)
-  ihc_data <- dplyr::mutate(ihc_data, .pid = norm_id(patient_id))
-  annots   <- dplyr::mutate(annots,   .pid = norm_id(patient_id))
-  common   <- intersect(unique(ihc_data$.pid), unique(annots$.pid))
-  if (length(common) == 0) {
-    warning("no patient IDs shared between ihc_data and annotations")
-    return(tibble::tibble())
-  }
+                                    scope = c("per_annotation", "union"),
+                                    use_csv_fallback = TRUE) {
+  scope    <- match.arg(scope)
+  ihc_data <- dplyr::mutate(ihc_data, .pid = norm_slide_id(patient_id))
+  annots   <- dplyr::mutate(annots,   .pid = norm_slide_id(patient_id))
+  ann_ids  <- unique(annots$.pid)
 
-  purrr::map_dfr(common, function(pid) {
+  purrr::map_dfr(unique(ihc_data$.pid), function(pid) {
     cells_p <- dplyr::filter(ihc_data, .pid == pid)
-    polys_p <- dplyr::filter(annots,   .pid == pid)
-    pts <- sf::st_as_sf(cells_p, coords = c("centroid_x", "centroid_y"),
-                        remove = FALSE, crs = sf::st_crs(polys_p))
-    within <- sf::st_within(pts, polys_p)  # per-cell list of polygon indices
 
-    if (scope == "union") {
-      inside <- lengths(within) > 0
+    if (pid %in% ann_ids) {
+      polys_p <- dplyr::filter(annots, .pid == pid)
+      pts <- sf::st_as_sf(cells_p, coords = c("centroid_x", "centroid_y"),
+                          remove = FALSE, crs = sf::st_crs(polys_p))
+      within <- sf::st_within(pts, polys_p)  # per-cell list of polygon indices
+
+      if (scope == "union") {
+        inside <- lengths(within) > 0
+        region_ratios(cells_p[inside, , drop = FALSE]) |>
+          dplyr::mutate(patient_id = pid, annotation = "union", source = "sf", .before = 1)
+      } else {
+        purrr::map_dfr(seq_len(nrow(polys_p)), function(i) {
+          inside_i <- vapply(within, function(idx) i %in% idx, logical(1))
+          region_ratios(cells_p[inside_i, , drop = FALSE]) |>
+            dplyr::mutate(patient_id = pid, annotation = polys_p$annotation[i],
+                          source = "sf", .before = 1)
+        })
+      }
+    } else if (use_csv_fallback && "Out_of_annotation" %in% names(cells_p)) {
+      inside <- !.is_outside(cells_p$Out_of_annotation)
       region_ratios(cells_p[inside, , drop = FALSE]) |>
-        dplyr::mutate(patient_id = pid, annotation = "union", .before = 1)
+        dplyr::mutate(patient_id = pid, annotation = "csv", source = "csv", .before = 1)
     } else {
-      purrr::map_dfr(seq_len(nrow(polys_p)), function(i) {
-        inside_i <- vapply(within, function(idx) i %in% idx, logical(1))
-        region_ratios(cells_p[inside_i, , drop = FALSE]) |>
-          dplyr::mutate(patient_id = pid, annotation = polys_p$annotation[i], .before = 1)
-      })
+      tibble::tibble()  # no polygon and no CSV flag -> nothing to report
     }
   })
 }
@@ -224,7 +264,7 @@ ihc_marker_fraction <- function(ihc_data, markers = ihc_markers) {
   sign_cols <- paste0(markers, "_sign")
   z_cols    <- paste0(markers, "_zscore")
   ihc_data |>
-    dplyr::mutate(patient_id = norm_id(patient_id)) |>
+    dplyr::mutate(patient_id = norm_slide_id(patient_id)) |>
     dplyr::group_by(patient_id) |>
     dplyr::summarise(
       dplyr::across(dplyr::all_of(sign_cols), ~ mean(is_pos(.x), na.rm = TRUE),
@@ -251,14 +291,14 @@ ihc_marker_long <- function(ihc_data, markers = ihc_markers) {
       names_to     = c("marker", ".value"),
       names_pattern = "(.*)_(raw|zscore|sign)"
     ) |>
-    dplyr::mutate(patient_id = norm_id(patient_id), pos = is_pos(sign))
+    dplyr::mutate(patient_id = norm_slide_id(patient_id), pos = is_pos(sign))
 }
 
 # Per-patient lineage composition over ALL cells (whole slide), for deconvolution
 # comparison. Long: patient_id, lineage, n, frac.
 ihc_lineage_fraction <- function(ihc_data) {
   ihc_data |>
-    dplyr::mutate(patient_id = norm_id(patient_id)) |>
+    dplyr::mutate(patient_id = norm_slide_id(patient_id)) |>
     dplyr::left_join(phenotype_lineage, by = "phenotype_clean") |>
     dplyr::count(patient_id, lineage, name = "n") |>
     dplyr::group_by(patient_id) |>
