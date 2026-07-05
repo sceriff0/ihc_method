@@ -339,8 +339,15 @@ ihc_annotation_metrics <- function(ihc_data, annots,
 
       if (scope == "union") {
         inside <- lengths(within) > 0
+        src    <- "sf"
+        # sf found no cells (invalid/misaligned polygon) -> fall back to the CSV
+        # Out_of_annotation flag so this patient is still counted in the union.
+        if (!any(inside) && use_csv_fallback && "Out_of_annotation" %in% names(cells_p)) {
+          inside <- !.is_outside(cells_p$Out_of_annotation)
+          src    <- "csv(sf-empty)"
+        }
         region_ratios(cells_p[inside, , drop = FALSE]) |>
-          dplyr::mutate(patient_id = pid, annotation = "union", source = "sf", .before = 1)
+          dplyr::mutate(patient_id = pid, annotation = "union", source = src, .before = 1)
       } else {
         purrr::map_dfr(seq_len(nrow(polys_p)), function(i) {
           inside_i <- vapply(within, function(idx) i %in% idx, logical(1))
@@ -356,6 +363,37 @@ ihc_annotation_metrics <- function(ihc_data, annots,
     } else {
       tibble::tibble()  # no polygon and no CSV flag -> nothing to report
     }
+  })
+}
+
+# Why does sf::st_within find no cells for a patient? Per patient with geojson,
+# compares the CELL centroid range to the POLYGON bounding box, reports polygon
+# validity, and the cells captured. Reading the table:
+#   poly bbox disjoint from cell range -> coordinate-scale/units mismatch (that
+#     slide's geojson is in a different frame than centroid_x/y).
+#   ranges overlap but n_inside == 0 -> invalid geometry (should be fixed by
+#     st_make_valid) or an axis flip.
+ihc_sf_diagnostics <- function(ihc_data, annots) {
+  ihc_data <- dplyr::mutate(ihc_data, .pid = slide_key(patient_id))
+  annots   <- dplyr::mutate(annots,   .pid = slide_key(patient_id))
+  common   <- intersect(unique(ihc_data$.pid), unique(annots$.pid))
+  rng <- function(v) sprintf("%.0f-%.0f", min(v, na.rm = TRUE), max(v, na.rm = TRUE))
+
+  purrr::map_dfr(common, function(pid) {
+    cells_p <- dplyr::filter(ihc_data, .pid == pid)
+    polys_p <- dplyr::filter(annots,   .pid == pid)
+    pts <- sf::st_as_sf(cells_p, coords = c("centroid_x", "centroid_y"),
+                        remove = FALSE, crs = sf::st_crs(polys_p))
+    inside <- lengths(sf::st_within(pts, polys_p)) > 0
+    bb <- sf::st_bbox(polys_p)
+    tibble::tibble(
+      patient_id = pid, n_cells = nrow(cells_p), n_polys = nrow(polys_p),
+      cell_x = rng(cells_p$centroid_x), cell_y = rng(cells_p$centroid_y),
+      poly_x = sprintf("%.0f-%.0f", bb[["xmin"]], bb[["xmax"]]),
+      poly_y = sprintf("%.0f-%.0f", bb[["ymin"]], bb[["ymax"]]),
+      polys_valid = all(sf::st_is_valid(polys_p)),
+      n_inside = sum(inside), pct_inside = round(100 * mean(inside), 1)
+    )
   })
 }
 

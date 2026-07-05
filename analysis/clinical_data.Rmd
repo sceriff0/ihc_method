@@ -71,6 +71,19 @@ if (length(intersect(neo_ids, ihc_ids)) == 0)
   warning("no overlap between ihc_data patients and neoplastic_data — check IDs")
 ```
 
+### sf membership diagnostics
+
+Why `sf::st_within` finds (or doesn't find) cells for each geojson patient. If
+`poly_x`/`poly_y` don't overlap `cell_x`/`cell_y`, that slide's annotation is in a
+different coordinate frame than its `centroid_x/y` (scale/units mismatch). If the
+ranges overlap but `n_inside == 0` with `polys_valid = FALSE`, it's an invalid
+polygon; `TRUE` with `n_inside == 0` suggests an axis flip.
+
+```{r sf-diagnostics}
+knitr::kable(ihc_sf_diagnostics(ihc_data, annots),
+             caption = "Cell coords vs polygon bbox, validity, and cells captured per patient")
+```
+
 ## Tumour content — IHC vs pathologist
 
 The pathologist scores tumour content per annotation (`ANNOTATION_1..3`). Compare
