@@ -24,9 +24,9 @@ have_bench <- file.exists(file.path(bench_dir, "measurements.csv"))
 
 Mirage image-processing **pipeline benchmark** — resource scaling, registration
 cost/accuracy, and segmentation-method comparison from the SLURM sweep. The figure
-logic is vendored verbatim from the mirage benchmarking branch
-(`benchmarks/analysis/plots.R` → `code/benchmark_plots.R`); this report just runs
-it against this project's sweep data and embeds the figures.
+logic is vendored from the mirage benchmarking branch
+(`benchmarks/analysis/plots.R` → `code/benchmark_plots.R`); this report builds the
+figures **inline from the sweep data** (no PNG files — each plot is rendered here).
 
 Internal IHC QC lives elsewhere: [ihc_qc.html](ihc_qc.html) (phenotyping,
 channels, morphology) and [exclusivity.html](exclusivity.html) (lineage spillover).
@@ -43,8 +43,11 @@ they are not committed):
   `registration_drift.csv` — figures that need an absent file are skipped.
 
 ```{r run-benchmark}
+bench_figs <- list()
 if (have_bench) {
-  source(here("code", "benchmark_plots.R"))   # writes PNGs to data/benchmark/figures_R/
+  # sourcing builds `bench_figs` (a named list of ggplots) from the sweep CSVs
+  source(here("code", "benchmark_plots.R"))
+  cat(length(bench_figs), "figure(s) built from", basename(bench_dir), "data.\n")
 } else {
   cat("No `data/benchmark/measurements.csv` found — add the sweep CSVs and re-knit.")
 }
@@ -52,17 +55,13 @@ if (have_bench) {
 
 ## Figures
 
-```{r embed-figures, results="asis"}
-figs <- if (have_bench) {
-  sort(list.files(file.path(bench_dir, "figures_R"), pattern = "\\.png$", full.names = TRUE))
-} else {
-  character(0)
-}
-
-if (length(figs)) {
-  for (f in figs) {
-    cat("\n\n### ", tools::file_path_sans_ext(basename(f)), "\n\n", sep = "")
-    cat(sprintf("![](%s)\n\n", f))
+```{r figures, results="asis", fig.width=9.5, fig.height=6}
+if (length(bench_figs)) {
+  for (nm in names(bench_figs)) {
+    title <- gsub("_", " ", sub("^[0-9]+[a-z]?_", "", nm))   # "01_memory_scaling" -> "memory scaling"
+    cat("\n\n### ", title, "\n\n", sep = "")
+    print(bench_figs[[nm]])
+    cat("\n\n")
   }
 } else if (have_bench) {
   cat("Benchmark data present but no figures were produced — check `measurements.csv` columns.")

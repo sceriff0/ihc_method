@@ -22,12 +22,13 @@ if (length(.missing))
 suppressPackageStartupMessages(lapply(.need, library, character.only = TRUE))
 
 adir  <- if (length(commandArgs(TRUE))) commandArgs(TRUE)[1] else here::here("data", "benchmark")
-outdir <- file.path(adir, "figures_R"); dir.create(outdir, showWarnings = FALSE, recursive = TRUE)
 CAPTION <- "Mirage benchmark sweep · mean over replicate runs · SLURM-isolated per-process resources"
-# PNG only (HTML embed); benchmarks.Rmd picks these up with knitr::include_graphics.
+# Collect each figure into a named list of ggplot objects. benchmarks.Rmd sources
+# this file and renders them INLINE from the data (no PNG files on disk).
+bench_figs <- list()
 save_fig <- function(p, name, w = 8, h = 5) {
-  p <- p + labs(caption = CAPTION)
-  ggsave(file.path(outdir, paste0(name, ".png")), p, width = w, height = h, dpi = 150)
+  bench_figs[[name]] <<- p + labs(caption = CAPTION)
+  invisible(NULL)
 }
 
 # Publication theme: generous type, restrained gridlines, bold titles, grey subtitles.
@@ -365,4 +366,4 @@ if (!is.null(qual) && "reg_tre_median_px" %in% names(qual) && "reg_distributed_t
   }
 }
 
-message("Wrote benchmark figures to ", normalizePath(outdir))
+message("Built ", length(bench_figs), " benchmark figure(s) from ", adir)
