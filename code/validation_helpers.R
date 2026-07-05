@@ -23,6 +23,28 @@ suppressPackageStartupMessages({
   library(sf)
 })
 
+# --- House plot style (adapted from mirage benchmarks/analysis/plots.R) ------
+# Okabe-Ito colourblind-safe categorical palette.
+oi <- c("#0072B2", "#D55E00", "#009E73", "#CC79A7",
+        "#E69F00", "#56B4E9", "#F0E442", "#000000")
+
+# Publication theme: generous type, restrained gridlines, bold titles, grey
+# subtitles/captions, top-left legend. Apply per-Rmd with theme_set(theme_paper).
+theme_paper <- ggplot2::theme_minimal(base_size = 12) +
+  ggplot2::theme(
+    plot.title       = ggplot2::element_text(face = "bold", size = ggplot2::rel(1.05)),
+    plot.subtitle    = ggplot2::element_text(colour = "grey35",
+                                             margin = ggplot2::margin(b = 8)),
+    plot.caption     = ggplot2::element_text(colour = "grey55",
+                                             size = ggplot2::rel(.7), hjust = 1),
+    plot.title.position = "plot", plot.caption.position = "plot",
+    axis.title       = ggplot2::element_text(colour = "grey20"),
+    panel.grid.minor = ggplot2::element_blank(),
+    panel.grid.major = ggplot2::element_line(linewidth = .3, colour = "grey90"),
+    strip.text       = ggplot2::element_text(face = "bold"),
+    legend.position  = "top", legend.justification = "left",
+    plot.margin      = ggplot2::margin(12, 16, 8, 12))
+
 # --- ID handling ------------------------------------------------------------
 # All datasets share one patient/slide ID but differ in punctuation (clinical
 # CRF uses dots, neoplastic uses bare digits, IHC comes from a filename). Strip

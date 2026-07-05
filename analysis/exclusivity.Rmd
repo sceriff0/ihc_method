@@ -1,0 +1,189 @@
+---
+title: "exclusivity"
+author: "sceriff0"
+date: "2026-07-05"
+output: workflowr::wflow_html
+editor_options:
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+suppressPackageStartupMessages({
+  library(tidyverse)
+  library(here)
+})
+
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE,
+                      fig.width = 9, fig.height = 6)
+
+invisible(capture.output(suppressMessages(source(here("code", "test.R")))))
+source(here("code", "validation_helpers.R"))
+theme_set(theme_paper)   # house style (mirage benchmarks)
+CAP <- "ihc_method internal QC · lineage leakage & exclusivity"
+```
+
+## Purpose
+
+**Lineage leakage & exclusivity** — an internal QC (only `ihc_data`) that reads the
+**segmentation and staining**: cell lineages biology keeps separate should not
+co-stain in the same cell. Excess co-positivity is a direct signal of **optical
+spillover between touching cells** or **mis-segmentation** (one mask capturing
+two cells). Split out of [benchmarks.html](benchmarks.html) so the phenotyping,
+channel and morphology checks stay separate from the spillover checks.
+
+Two views: phenotype-level leakage, then a literature-backed panel of
+mutually-exclusive marker pairs — each with its rare biological exception noted so
+the QC flags *excess* co-positivity, not the known baseline.
+
+## 1. Phenotype-level leakage
+
+CD45⁺ cells among tumour-typed cells, and PANCK⁺ cells among immune-typed cells —
+both should be ~0 if the phenotyping respects the tumour/immune divide.
+
+```{r leakage}
+immune_ph <- c("Immune", "T helper", "T cytotoxic", "Activated T cytotoxic",
+               "CD4+ Treg", "CD8+ T reg", "Natural Killer", "Activated Natural Killer")
+
+excl <- ihc_data |>
+  mutate(patient_id  = slide_key(patient_id),
+         is_tumor_ph = str_detect(replace_na(phenotype_clean, ""), "Tumor"),
+         is_immune_ph = phenotype_clean %in% immune_ph,
+         panck_pos = is_pos(PANCK_sign),
+         cd45_pos  = is_pos(CD45_sign))
+
+spill <- excl |>
+  group_by(patient_id) |>
+  summarise(
+    n_cells            = n(),
+    cd45pos_in_tumorph = if (any(is_tumor_ph))  mean(cd45_pos[is_tumor_ph],  na.rm = TRUE) else NA_real_,
+    panckpos_in_immune = if (any(is_immune_ph)) mean(panck_pos[is_immune_ph], na.rm = TRUE) else NA_real_,
+    .groups = "drop"
+  )
+knitr::kable(spill, digits = 3,
+             caption = "Per-patient phenotype-level leakage (want ~0)")
+```
+
+```{r leakage-plot, fig.height=4.5}
+spill |>
+  pivot_longer(c(cd45pos_in_tumorph, panckpos_in_immune),
+               names_to = "leak", values_to = "rate") |>
+  filter(!is.na(rate)) |>
+  mutate(leak = c(cd45pos_in_tumorph = "CD45+ among tumour-typed",
+                  panckpos_in_immune = "PANCK+ among immune-typed")[leak]) |>
+  ggplot(aes(reorder(patient_id, rate), rate, fill = leak)) +
+    geom_col(position = position_dodge(width = .7), width = .65) +
+    coord_flip() +
+    scale_fill_manual(values = oi[c(1, 2)], name = NULL) +
+    labs(title = "Phenotype-level leakage per patient",
+         subtitle = "Fraction of a lineage's cells calling the opposite lineage's marker — lower is better.",
+         x = "patient", y = "fraction of cells", caption = CAP)
+```
+
+## 2. Marker-pair exclusivity panel
+
+Each pair is two markers biology assigns to distinct lineages. `p_b_given_a` /
+`p_a_given_b` are the conditional co-positivity rates — the fraction of one
+marker's positive cells that also call the other. These should sit near the
+"expected co-positivity" column (the rare true double-positive population); values
+well above it flag spillover for that pair.
+
+```{r exclusivity-pairs}
+# Per-cell marker positivity matrix (one logical column per marker).
+sign_pos <- ihc_data |>
+  transmute(patient_id = slide_key(patient_id),
+            across(all_of(paste0(ihc_markers, "_sign")), is_pos, .names = "{.col}")) |>
+  rename_with(~ sub("_sign$", "", .x), ends_with("_sign"))
+
+# Literature-backed mutually-exclusive lineage marker pairs (+ known exception).
+exclusivity_pairs <- tibble::tribble(
+  ~a,      ~b,      ~pair_label,                              ~expected_copos, ~reference,
+  "PANCK", "CD45",  "epithelial/tumour vs leukocyte",         "~0 (rare hybrid CTCs)",     "Nandedkar 1998",
+  "CD4",   "CD8",   "helper vs cytotoxic T",                  "~3% peripheral DP-T",       "Overgaard 2023 (Biomedicines)",
+  "CD3",   "CD56",  "T cell vs NK cell",                      "rare CD3+CD56+ NKT",        "std NK/NKT gating",
+  "CD3",   "CD14",  "lymphoid vs monocyte/macrophage",        "~0 distinct lineages",      "flow-panel convention",
+  "CD3",   "CD163", "lymphoid vs M2 macrophage",              "~0 (lymphocytes CD163-)",   "Roberts 2004",
+  "CD45",  "SMA",   "leukocyte vs smooth-muscle/myofibroblast","~0 distinct lineages",     "stromal-marker convention"
+) |>
+  # keep only pairs whose markers are both present
+  filter(a %in% names(sign_pos), b %in% names(sign_pos))
+
+pair_stats <- exclusivity_pairs |>
+  rowwise() |>
+  mutate(
+    n_a          = sum(sign_pos[[a]], na.rm = TRUE),
+    n_b          = sum(sign_pos[[b]], na.rm = TRUE),
+    n_both       = sum(sign_pos[[a]] & sign_pos[[b]], na.rm = TRUE),
+    pct_dp_all   = n_both / nrow(sign_pos),
+    p_b_given_a  = ifelse(n_a > 0, n_both / n_a, NA_real_),
+    p_a_given_b  = ifelse(n_b > 0, n_both / n_b, NA_real_)
+  ) |>
+  ungroup() |>
+  select(pair = pair_label, a, b, expected_copos, reference,
+         n_both, pct_dp_all, p_b_given_a, p_a_given_b)
+
+knitr::kable(pair_stats, digits = 4,
+             caption = "Mutually-exclusive marker pairs: observed vs expected co-positivity")
+```
+
+```{r exclusivity-summary, fig.height=4.5}
+# The worst-case conditional co-positivity per pair (max of the two directions).
+pair_stats |>
+  mutate(max_cond = pmax(p_b_given_a, p_a_given_b, na.rm = TRUE),
+         pair = sprintf("%s / %s", a, b)) |>
+  filter(is.finite(max_cond)) |>
+  ggplot(aes(reorder(pair, max_cond), max_cond)) +
+    geom_col(fill = oi[2], width = .65) +
+    coord_flip() +
+    scale_y_continuous(labels = scales::percent_format(accuracy = 1)) +
+    labs(title = "Worst-direction co-positivity per exclusive pair",
+         subtitle = "max( P(B+|A+), P(A+|B+) ) — high bars = the pair most likely showing spillover.",
+         x = NULL, y = "conditional co-positivity", caption = CAP)
+```
+
+```{r exclusivity-heatmap}
+per_pat <- exclusivity_pairs |>
+  select(a, b, pair_label) |>
+  purrr::pmap_dfr(function(a, b, pair_label) {
+    sign_pos |>
+      group_by(patient_id) |>
+      summarise(dp = mean(.data[[a]] & .data[[b]], na.rm = TRUE), .groups = "drop") |>
+      mutate(pair = pair_label)
+  })
+
+if (nrow(per_pat) > 0) {
+  ggplot(per_pat, aes(patient_id, pair, fill = dp)) +
+    geom_tile(colour = "white") +
+    scale_fill_viridis_c(option = "magma", direction = -1,
+                         labels = scales::percent_format(accuracy = .1),
+                         name = "double-pos\nfraction") +
+    labs(title = "Marker-pair co-positivity per patient",
+         subtitle = "Bright = high double-positive rate = likely spillover in that patient.",
+         x = "patient", y = NULL, caption = CAP) +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1),
+          panel.grid = element_blank())
+}
+```
+
+**Pairs deliberately excluded** (this panel's phenotypes acknowledge their
+overlap, so co-positivity is expected, not an artifact): PANCK/VIMENTIN (the
+`VIM+Tumor` EMT phenotype), and CD8/FOXP3 (the `CD8+ T reg` phenotype).
+
+**References for the exclusivity claims:**
+
+- PANCK/CD45 — Nandedkar MA *et al.* (1998), CD45 immunoreactivity as a diagnostic
+  pitfall in carcinoma: keratin and CD45 are normally exclusive.
+  [PubMed 9872653](https://pubmed.ncbi.nlm.nih.gov/9872653/)
+- CD4/CD8 — "Legend or Truth: Mature CD4⁺CD8⁺ Double-Positive T Cells in the
+  Periphery," *Biomedicines* 2023: DP-T are a real but ~3% minority.
+  [MDPI](https://www.mdpi.com/2227-9059/11/10/2702)
+- CD3/CD56 — CD3⁻CD56⁺ = NK, CD3⁺CD56⁺ = rare NKT; standard immunophenotyping.
+- CD3/CD163 — Roberts ES *et al.* (2004): lymphocytes are CD163-negative.
+  [PMC2258269](https://pmc.ncbi.nlm.nih.gov/articles/PMC2258269/)
+
+## Notes
+
+- Uses only `ihc_data` — no external reference, so it holds for every imaged slide.
+- A high co-positivity for an *exclusive* pair points at segmentation/optical
+  spillover between neighbouring cells, not biology — cross-check the offending
+  patient in the per-patient heatmap and the channel QC in
+  [benchmarks.html](benchmarks.html).
