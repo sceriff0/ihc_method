@@ -40,17 +40,17 @@ expr_long <- counts_data |>
   mutate(patient_id = norm_id(Sample)) |>
   pivot_longer(-c(Sample, patient_id), names_to = "gene", values_to = "expr")
 
-# marker -> its genes, one row per (marker, gene); keep only genes present in RNA.
-marker_genes <- marker_gene_map |>
-  separate_rows(genes, sep = ",") |>
-  rename(gene = genes) |>
-  filter(gene %in% unique(expr_long$gene))
+# marker -> its genes, one row per (marker, gene). Explicit $-access + strsplit
+# (no NSE) so it is robust to the base pipe / tidyr separate_rows() quirks.
+gene_rows <- do.call(rbind, Map(function(m, g)
+  data.frame(marker = m, gene = trimws(strsplit(g, ",")[[1]]), stringsAsFactors = FALSE),
+  marker_gene_map$marker, marker_gene_map$genes))
 
-missing <- setdiff(
-  marker_gene_map |> separate_rows(genes, sep = ",") |> pull(genes),
-  unique(expr_long$gene)
-)
+missing <- setdiff(gene_rows$gene, unique(expr_long$gene))
 if (length(missing)) message("genes absent from RNA matrix: ", paste(missing, collapse = ", "))
+
+# keep only genes present in the RNA matrix
+marker_genes <- gene_rows |> filter(gene %in% unique(expr_long$gene))
 
 # Per patient, average expression across a marker's available genes.
 marker_expr <- expr_long |>
