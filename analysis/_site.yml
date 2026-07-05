@@ -1,0 +1,21 @@
+name: ihc_method
+output_dir: ../docs
+navbar:
+  title: ihc_method
+  left:
+  - text: Home
+    href: index.html
+  - text: About
+    href: about.html
+  - text: License
+    href: license.html
+  right:
+  - icon: fab fa-github
+    text: Source code
+    href: https://github.com/sceriff0/ihc_method
+output:
+  workflowr::wflow_html:
+    toc: yes
+    toc_float: yes
+    theme: cosmo
+    highlight: textmate
