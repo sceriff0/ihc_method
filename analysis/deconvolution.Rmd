@@ -97,9 +97,18 @@ if (requireNamespace("immunedeconv", quietly = TRUE)) {
 ## IHC lineage fractions (reference)
 
 ```{r ihc-lineages}
-ihc_lin <- ihc_lineage_fraction(ihc_data) |>
+lin_raw <- ihc_lineage_fraction(ihc_data) |>
   filter(lineage %in% comparable_lineages) |>
   select(patient_id, lineage, ihc_frac = frac)
+
+# Complete the patient x lineage grid: a lineage a patient simply lacks must read
+# as 0 (present), not a missing row. Otherwise the inner_join below silently drops
+# that patient from that lineage's panel — the "plot never shows all patients" bug.
+ihc_lin <- expand.grid(patient_id = unique(slide_key(ihc_data$patient_id)),
+                       lineage    = comparable_lineages,
+                       stringsAsFactors = FALSE) |>
+  left_join(lin_raw, by = c("patient_id", "lineage")) |>
+  mutate(ihc_frac = ifelse(is.na(ihc_frac), 0, ihc_frac))
 
 cat("IHC patients with lineage fractions:", dplyr::n_distinct(ihc_lin$patient_id), "\n")
 ```

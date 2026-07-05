@@ -54,14 +54,14 @@ annotations.
 
 ```{r annotations}
 # IHC, neoplastic and geojson all live in the SLIDE-id space (numeric codes).
-neo_ids <- norm_slide_id(neoplastic_data$SAMPLE)
+neo_ids <- slide_key(neoplastic_data$SAMPLE)
 annots  <- load_annotations(patient_ids = neoplastic_data$SAMPLE)
 
 cat("annotation polygons loaded:", nrow(annots),
     "for", dplyr::n_distinct(annots$patient_id), "patients\n")
 
-ihc_ids       <- unique(norm_slide_id(ihc_data$patient_id))
-have_geojson  <- unique(norm_slide_id(annots$patient_id))
+ihc_ids       <- unique(slide_key(ihc_data$patient_id))
+have_geojson  <- unique(slide_key(annots$patient_id))
 no_geojson    <- setdiff(intersect(neo_ids, ihc_ids), have_geojson)
 cat("patients with BOTH IHC cells and pathologist score:",
     length(intersect(neo_ids, ihc_ids)), "\n")
@@ -81,7 +81,7 @@ ihc_tumor_per_ann <- ihc_annotation_metrics(ihc_data, annots, scope = "per_annot
 ihc_tumor_union   <- ihc_annotation_metrics(ihc_data, annots, scope = "union")
 
 path_long <- neoplastic_data |>
-  mutate(patient_id = norm_slide_id(SAMPLE)) |>
+  mutate(patient_id = slide_key(SAMPLE)) |>
   pivot_longer(starts_with("ANNOTATION_"),
                names_to = "annotation", values_to = "path_pct") |>
   filter(!is.na(path_pct)) |>
@@ -152,7 +152,7 @@ and `Immuno-phenotype` (categorical).
 ```{r infiltrate-join}
 # IHC metrics are slide-space; clinical is keyed to slides via `ID PATIENT`.
 clin <- clinical_data |>
-  mutate(patient_id = norm_slide_id(`ID PATIENT`)) |>
+  mutate(patient_id = slide_key(`ID PATIENT`)) |>
   select(patient_id,
          hot_score  = any_of("HOT score"),
          immuno_phe = any_of("Immuno-phenotype"))
@@ -193,6 +193,8 @@ if ("immuno_phe" %in% names(infiltrate) &&
     geom_jitter(width = 0.2, alpha = 0.6) +
     facet_wrap(~ ihc_metric, scales = "free_y") +
     labs(title = "IHC infiltrate metrics by clinical immuno-phenotype",
+         subtitle = sprintf("%d patients with both IHC infiltrate and immuno-phenotype",
+                            dplyr::n_distinct(df$patient_id)),
          x = NULL, y = "fraction inside tumour region", colour = "Immuno-phenotype") +
     theme_classic(base_size = 11) +
     theme(axis.text.x = element_text(angle = 30, hjust = 1))
@@ -218,7 +220,7 @@ ihc_immune <- full_join(ihc_lin, ihc_mk, by = "patient_id")
 
 # Full clinical table on the shared key (slide space via `ID PATIENT`).
 clin_full <- clinical_data |>
-  mutate(patient_id = norm_slide_id(`ID PATIENT`))
+  mutate(patient_id = slide_key(`ID PATIENT`))
 
 ihc_clin <- ihc_immune |> inner_join(clin_full, by = "patient_id")
 cat("patients with whole-slide IHC immune metrics + clinical row:", nrow(ihc_clin), "\n")
@@ -273,13 +275,16 @@ Immunologically "hot" tumours tend to respond better to induction chemotherapy.
 ```{r response}
 if ("RESPONSE" %in% names(ihc_clin)) {
   df <- ihc_clin |>
-    filter(!is.na(RESPONSE), is.finite(ihc_immune_score)) |>
-    mutate(RESPONSE = fct_infreq(as.character(RESPONSE)))
+    filter(!is.na(RESPONSE), is.finite(ihc_immune_score))
+  # order response by descending frequency (base R; avoids forcats on this env)
+  df$RESPONSE <- factor(as.character(df$RESPONSE),
+                        levels = names(sort(table(df$RESPONSE), decreasing = TRUE)))
   if (dplyr::n_distinct(df$RESPONSE) > 1 && nrow(df) > 3) {
     ggplot(df, aes(RESPONSE, ihc_immune_score, colour = RESPONSE)) +
       geom_boxplot(outlier.shape = NA) +
       geom_jitter(width = 0.2, alpha = 0.6) +
       labs(title = "IHC immune score by induction response",
+           subtitle = sprintf("%d patients with both IHC score and response", nrow(df)),
            x = NULL, y = "IHC immune score (CD45+ fraction)") +
       theme_classic(base_size = 12) +
       theme(axis.text.x = element_text(angle = 30, hjust = 1), legend.position = "none")

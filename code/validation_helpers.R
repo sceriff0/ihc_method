@@ -40,6 +40,21 @@ norm_slide_id <- function(x) {
   ifelse(d == "" | is.na(x), norm_id(x), d)
 }
 
+# Known clinical `ID PATIENT` data-entry errors: the value on the LEFT is what the
+# clinical sheet reads, the RIGHT is the true slide/neoplastic id it should match.
+# Default handles the verified transposition (clinical "15879" == slide "15897").
+SLIDE_ID_FIXES <- c("15879" = "15897")
+
+# THE canonical slide-space join key: normalise + apply the typo fixes. Every
+# join on a slide id (IHC, neoplastic, clinical `ID PATIENT`) must use this so no
+# call site silently omits the correction and drops a patient.
+slide_key <- function(x, fixes = SLIDE_ID_FIXES) {
+  s   <- norm_slide_id(x)
+  hit <- s %in% names(fixes)
+  s[hit] <- unname(fixes[s[hit]])
+  s
+}
+
 # Crosswalk between the two id systems, read from clinical_data:
 #   slide_id (norm_slide_id of `ID PATIENT`)  <->  crf_id (norm_id of `ID CRF PRESERVE`)
 # `ID CRF PRESERVE` also keys counts_data$Sample, so this bridges IHC/neoplastic
@@ -49,14 +64,11 @@ norm_slide_id <- function(x) {
 id_crosswalk <- function(clinical_data,
                          patient_col = "ID PATIENT",
                          crf_col     = "ID CRF PRESERVE",
-                         slide_id_fixes = c("15879" = "15897")) {
-  tibble::tibble(
-    slide_id = norm_slide_id(clinical_data[[patient_col]]),
-    crf_id   = norm_id(clinical_data[[crf_col]])
-  ) |>
-    dplyr::mutate(slide_id = dplyr::recode(slide_id, !!!slide_id_fixes)) |>
-    dplyr::filter(slide_id != "", crf_id != "") |>
-    dplyr::distinct()
+                         slide_id_fixes = SLIDE_ID_FIXES) {
+  slide <- slide_key(clinical_data[[patient_col]], slide_id_fixes)
+  crf   <- norm_id(clinical_data[[crf_col]])
+  keep  <- slide != "" & crf != "" & !is.na(slide) & !is.na(crf)
+  unique(tibble::tibble(slide_id = slide[keep], crf_id = crf[keep]))
 }
 
 # TRUE where a FlowPath `<marker>_sign` column marks a positive cell. The
@@ -221,8 +233,8 @@ ihc_annotation_metrics <- function(ihc_data, annots,
                                     scope = c("per_annotation", "union"),
                                     use_csv_fallback = TRUE) {
   scope    <- match.arg(scope)
-  ihc_data <- dplyr::mutate(ihc_data, .pid = norm_slide_id(patient_id))
-  annots   <- dplyr::mutate(annots,   .pid = norm_slide_id(patient_id))
+  ihc_data <- dplyr::mutate(ihc_data, .pid = slide_key(patient_id))
+  annots   <- dplyr::mutate(annots,   .pid = slide_key(patient_id))
   ann_ids  <- unique(annots$.pid)
 
   purrr::map_dfr(unique(ihc_data$.pid), function(pid) {
@@ -264,7 +276,7 @@ ihc_marker_fraction <- function(ihc_data, markers = ihc_markers) {
   sign_cols <- paste0(markers, "_sign")
   z_cols    <- paste0(markers, "_zscore")
   ihc_data |>
-    dplyr::mutate(patient_id = norm_slide_id(patient_id)) |>
+    dplyr::mutate(patient_id = slide_key(patient_id)) |>
     dplyr::group_by(patient_id) |>
     dplyr::summarise(
       dplyr::across(dplyr::all_of(sign_cols), ~ mean(is_pos(.x), na.rm = TRUE),
@@ -291,14 +303,14 @@ ihc_marker_long <- function(ihc_data, markers = ihc_markers) {
       names_to     = c("marker", ".value"),
       names_pattern = "(.*)_(raw|zscore|sign)"
     ) |>
-    dplyr::mutate(patient_id = norm_slide_id(patient_id), pos = is_pos(sign))
+    dplyr::mutate(patient_id = slide_key(patient_id), pos = is_pos(sign))
 }
 
 # Per-patient lineage composition over ALL cells (whole slide), for deconvolution
 # comparison. Long: patient_id, lineage, n, frac.
 ihc_lineage_fraction <- function(ihc_data) {
   ihc_data |>
-    dplyr::mutate(patient_id = norm_slide_id(patient_id)) |>
+    dplyr::mutate(patient_id = slide_key(patient_id)) |>
     dplyr::left_join(phenotype_lineage, by = "phenotype_clean") |>
     dplyr::count(patient_id, lineage, name = "n") |>
     dplyr::group_by(patient_id) |>
