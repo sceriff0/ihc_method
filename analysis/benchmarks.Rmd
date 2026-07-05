@@ -8,191 +8,63 @@ editor_options:
 ---
 
 ```{r setup, include=FALSE}
-# renv: tidyverse + here (in the lockfile). Optional: diptest for Hartigan's dip
-# test (a bimodality-coefficient fallback runs if it is absent).
-#   renv::install("diptest"); renv::snapshot()
+# renv: tidyverse + scales + here (in the lockfile). Figure logic is vendored from
+# the mirage benchmarking branch (code/benchmark_plots.R).
 suppressPackageStartupMessages({
   library(tidyverse)
   library(here)
 })
+knitr::opts_chunk$set(echo = FALSE, message = FALSE, warning = FALSE)
 
-knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE,
-                      fig.width = 9, fig.height = 6)
-
-invisible(capture.output(suppressMessages(source(here("code", "test.R")))))
-source(here("code", "validation_helpers.R"))
-theme_set(theme_paper)   # house style (mirage benchmarks)
-CAP <- "ihc_method internal QC · FlowPath single-cell IHC"
+bench_dir  <- here("data", "benchmark")
+have_bench <- file.exists(file.path(bench_dir, "measurements.csv"))
 ```
 
 ## Purpose
 
-**Internal QC of the IHC readout** — validation that needs no external reference,
-only `ihc_data`. Traces a fault backwards through the pipeline:
+Mirage image-processing **pipeline benchmark** — resource scaling, registration
+cost/accuracy, and segmentation-method comparison from the SLURM sweep. The figure
+logic is vendored verbatim from the mirage benchmarking branch
+(`benchmarks/analysis/plots.R` → `code/benchmark_plots.R`); this report just runs
+it against this project's sweep data and embeds the figures.
 
-1. **Phenotype ↔ marker concordance** — do cells labelled a type express the
-   marker that defines it? (validates the phenotyping/gating)
-2. **Per-channel usability** — is each marker's `_sign` a clean threshold on a
-   bimodal signal? (validates the individual stains)
-3. **Morphology by phenotype** — do cell shapes match their assigned type?
-   (validates that segmentation captures real cells)
+Internal IHC QC lives elsewhere: [ihc_qc.html](ihc_qc.html) (phenotyping,
+channels, morphology) and [exclusivity.html](exclusivity.html) (lineage spillover).
 
-Lineage **leakage & exclusivity** (segmentation / optical spillover) now lives in
-its own report — see [exclusivity.html](exclusivity.html).
+## Benchmark data
 
-```{r marker-long}
-mk_long <- ihc_marker_long(ihc_data) |>
-  filter(!is.na(phenotype_clean), phenotype_clean != "Unknown")
-cat("cells:", dplyr::n_distinct(mk_long$cell_id),
-    "| markers:", dplyr::n_distinct(mk_long$marker),
-    "| phenotypes:", dplyr::n_distinct(mk_long$phenotype_clean), "\n")
-```
+Drop the sweep CSVs into **`data/benchmark/`** (under the gitignored `data/`, so
+they are not committed):
 
-## 1. Phenotype ↔ marker concordance
+- `measurements.csv` — **required**; one row per (run × process) with
+  `peak_rss_gb`, `realtime_s`, `input_gb`, and every swept parameter.
+- optional: `resource_stats.csv`, `quality.csv`, `run_cost.csv`,
+  `segmentation_agreement.csv`, `classic_vs_distributed_registration.csv`,
+  `registration_drift.csv` — figures that need an absent file are skipped.
 
-Mean marker z-score per phenotype. A trustworthy readout shows a block/diagonal
-structure — each cell type lights up its defining marker(s) and little else.
-
-```{r concordance-matrix}
-conc <- mk_long |>
-  group_by(phenotype_clean, marker) |>
-  summarise(mean_z = mean(zscore, na.rm = TRUE),
-            pct_pos = mean(pos,  na.rm = TRUE), .groups = "drop")
-
-ggplot(conc, aes(marker, phenotype_clean, fill = mean_z)) +
-  geom_tile(colour = "white") +
-  scale_fill_gradient2(low = "#2166ac", mid = "white", high = "#b2182b",
-                       midpoint = 0, name = "mean z") +
-  labs(title = "Phenotype vs marker: mean z-score",
-       subtitle = "Expect each phenotype to peak on its defining marker(s); off-diagonal signal = mislabelled cells.",
-       x = "marker", y = "phenotype (phenotype_clean)", caption = CAP) +
-  theme(axis.text.x = element_text(angle = 45, hjust = 1),
-        panel.grid = element_blank())
-```
-
-```{r concordance-expected}
-# Encode the expected defining marker(s) per phenotype and check it is the top
-# (or near-top) signal. Flags phenotypes whose defining marker is not their max.
-expected <- tibble::tribble(
-  ~phenotype_clean,           ~marker,
-  "PANCK+Tumor",              "PANCK",
-  "VIM+Tumor",                "VIMENTIN",
-  "T helper",                 "CD4",
-  "T cytotoxic",              "CD8",
-  "Activated T cytotoxic",    "CD8",
-  "CD4+ Treg",                "FOXP3",
-  "CD8+ T reg",               "FOXP3",
-  "Natural Killer",           "CD56",
-  "Activated Natural Killer", "CD56",
-  "Immune",                   "CD45",
-  "Stroma",                   "SMA"
-)
-
-check <- conc |>
-  group_by(phenotype_clean) |>
-  mutate(rank_z = rank(-mean_z)) |>
-  inner_join(expected, by = c("phenotype_clean", "marker")) |>
-  transmute(phenotype_clean, defining_marker = marker,
-            mean_z = round(mean_z, 2), rank_of_defining = as.integer(rank_z),
-            pass = rank_z <= 2) |>
-  arrange(desc(rank_of_defining))
-knitr::kable(check, caption = "Is each phenotype's defining marker among its top-2 signals?")
-```
-
-## 2. Per-channel usability
-
-A usable marker has a **bimodal** z-score (a negative and a positive population)
-and a `_sign` call that cleanly separates them. Bimodality: Hartigan's dip test
-(if `diptest` is installed) plus Sarle's bimodality coefficient (BC > 0.555
-suggests bimodality). Separation: are the `_sign+` z-scores disjoint from
-`_sign−`, and what cutoff sits between them.
-
-```{r channel-qc}
-bimodality_coef <- function(x) {                       # Sarle's BC
-  x <- x[is.finite(x)]; n <- length(x)
-  if (n < 4) return(NA_real_)
-  m <- mean(x); s <- sd(x); if (s == 0) return(NA_real_)
-  g <- mean(((x - m) / s)^3)                           # skewness
-  k <- mean(((x - m) / s)^4) - 3                        # excess kurtosis
-  (g^2 + 1) / (k + 3 * (n - 1)^2 / ((n - 2) * (n - 3)))
+```{r run-benchmark}
+if (have_bench) {
+  source(here("code", "benchmark_plots.R"))   # writes PNGs to data/benchmark/figures_R/
+} else {
+  cat("No `data/benchmark/measurements.csv` found — add the sweep CSVs and re-knit.")
 }
-dip_p <- function(x) {
-  x <- x[is.finite(x)]
-  if (!requireNamespace("diptest", quietly = TRUE) || length(x) < 4) return(NA_real_)
-  suppressWarnings(diptest::dip.test(x)$p.value)
+```
+
+## Figures
+
+```{r embed-figures, results="asis"}
+figs <- if (have_bench) {
+  sort(list.files(file.path(bench_dir, "figures_R"), pattern = "\\.png$", full.names = TRUE))
+} else {
+  character(0)
 }
 
-channel_qc <- ihc_marker_long(ihc_data) |>
-  filter(!is.na(zscore)) |>
-  group_by(marker) |>
-  summarise(
-    n        = n(),
-    bc       = bimodality_coef(zscore),
-    dip_p    = dip_p(zscore),
-    neg_max  = suppressWarnings(max(zscore[!pos], na.rm = TRUE)),
-    pos_min  = suppressWarnings(min(zscore[pos],  na.rm = TRUE)),
-    .groups  = "drop"
-  ) |>
-  mutate(
-    separable = is.finite(neg_max) & is.finite(pos_min) & pos_min > neg_max,
-    cutoff    = if_else(separable, (neg_max + pos_min) / 2, NA_real_),
-    likely_bimodal = bc > 0.555 | (!is.na(dip_p) & dip_p < 0.05)
-  ) |>
-  arrange(desc(bc))
-knitr::kable(channel_qc, digits = 3,
-             caption = "Per-channel bimodality and sign-vs-zscore separability")
+if (length(figs)) {
+  for (f in figs) {
+    cat("\n\n### ", tools::file_path_sans_ext(basename(f)), "\n\n", sep = "")
+    cat(sprintf("![](%s)\n\n", f))
+  }
+} else if (have_bench) {
+  cat("Benchmark data present but no figures were produced — check `measurements.csv` columns.")
+}
 ```
-
-```{r channel-qc-plot, fig.height=8}
-ihc_marker_long(ihc_data) |>
-  filter(!is.na(zscore), !is.na(sign)) |>
-  mutate(call = if_else(pos, "sign +", "sign -")) |>
-  ggplot(aes(zscore, fill = call)) +
-    geom_density(alpha = 0.55, colour = NA) +
-    facet_wrap(~ marker, scales = "free") +
-    scale_fill_manual(values = c("sign +" = oi[1], "sign -" = oi[2]), name = NULL) +
-    labs(title = "Marker z-score by sign call",
-         subtitle = "Clean channels show two separated humps; failed channels overlap or are unimodal.",
-         x = "z-score", y = "density", caption = CAP)
-```
-
-## 3. Morphology by phenotype
-
-Segmentation should produce cells whose shape matches their type: tumour cells
-larger, lymphocytes small and round (high solidity), stroma elongated (high
-eccentricity). Includes circularity = 4·π·area / perimeter².
-
-```{r morphology}
-morph_feats <- intersect(c("area", "perimeter", "eccentricity", "solidity"),
-                         names(ihc_data))
-
-morph <- ihc_data |>
-  filter(!is.na(phenotype_clean), phenotype_clean != "Unknown") |>
-  mutate(circularity = if (all(c("area", "perimeter") %in% names(ihc_data)))
-           4 * pi * area / perimeter^2 else NA_real_) |>
-  select(phenotype_clean, any_of(c(morph_feats, "circularity"))) |>
-  pivot_longer(-phenotype_clean, names_to = "feature", values_to = "value") |>
-  filter(is.finite(value))
-
-ggplot(morph, aes(reorder(phenotype_clean, value, FUN = median), value,
-                  fill = phenotype_clean)) +
-  geom_boxplot(outlier.shape = NA, width = .6, colour = "grey30") +
-  facet_wrap(~ feature, scales = "free") +
-  coord_flip() +
-  scale_fill_viridis_d(option = "D", guide = "none") +
-  labs(title = "Cell morphology by phenotype",
-       subtitle = "Shapes should track cell type: tumour largest, lymphocytes small/round, stroma elongated.",
-       x = NULL, y = NULL, caption = CAP)
-```
-
-## Notes
-
-- All three checks use only `ihc_data` — no external reference, so they hold even
-  for slides with no pathologist annotation or matched RNA.
-- Concordance (#1) reads the gating; channel QC (#2) reads the individual stains;
-  morphology (#3) reads the segmentation. A failure in #1 is often explained by a
-  culprit surfaced in #2 (a bad channel) or by spillover (see
-  [exclusivity.html](exclusivity.html)).
-- `separable = FALSE` in the channel table means `_sign` is not a pure threshold on
-  `_zscore` (likely thresholded on `_raw` instead) — inspect that channel's density
-  panel before trusting its positivity calls.

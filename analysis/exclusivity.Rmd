@@ -28,7 +28,7 @@ CAP <- "ihc_method internal QC · lineage leakage & exclusivity"
 **segmentation and staining**: cell lineages biology keeps separate should not
 co-stain in the same cell. Excess co-positivity is a direct signal of **optical
 spillover between touching cells** or **mis-segmentation** (one mask capturing
-two cells). Split out of [benchmarks.html](benchmarks.html) so the phenotyping,
+two cells). Split out of [ihc_qc.html](ihc_qc.html) so the phenotyping,
 channel and morphology checks stay separate from the spillover checks.
 
 Two views: phenotype-level leakage, then a literature-backed panel of
@@ -186,4 +186,4 @@ overlap, so co-positivity is expected, not an artifact): PANCK/VIMENTIN (the
 - A high co-positivity for an *exclusive* pair points at segmentation/optical
   spillover between neighbouring cells, not biology — cross-check the offending
   patient in the per-patient heatmap and the channel QC in
-  [benchmarks.html](benchmarks.html).
+  [ihc_qc.html](ihc_qc.html).
