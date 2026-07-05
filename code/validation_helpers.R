@@ -237,6 +237,23 @@ ihc_marker_fraction <- function(ihc_data, markers = ihc_markers) {
     dplyr::rename_with(~ sub("_zscore$", "_z",       .x), dplyr::ends_with("_zscore"))
 }
 
+# Long form of the per-cell marker table: one row per (cell, marker) with the
+# raw / zscore / sign triple side by side. Used by the internal-QC benchmarks
+# (phenotype-marker concordance, per-channel usability). wrongL1CAM/DAPI excluded
+# via the default marker list.
+ihc_marker_long <- function(ihc_data, markers = ihc_markers) {
+  keep <- intersect(c("cell_id", "patient_id", "phenotype_clean"), names(ihc_data))
+  trip <- c(paste0(markers, "_raw"), paste0(markers, "_zscore"), paste0(markers, "_sign"))
+  ihc_data |>
+    dplyr::select(dplyr::any_of(keep), dplyr::any_of(trip)) |>
+    tidyr::pivot_longer(
+      -dplyr::any_of(keep),
+      names_to     = c("marker", ".value"),
+      names_pattern = "(.*)_(raw|zscore|sign)"
+    ) |>
+    dplyr::mutate(patient_id = norm_id(patient_id), pos = is_pos(sign))
+}
+
 # Per-patient lineage composition over ALL cells (whole slide), for deconvolution
 # comparison. Long: patient_id, lineage, n, frac.
 ihc_lineage_fraction <- function(ihc_data) {

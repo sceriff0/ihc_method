@@ -9,8 +9,13 @@ editor_options:
 
 ```{r setup, include=FALSE}
 # renv: needs immunedeconv (multi-method deconvolution) + tidyverse, here.
-#   immunedeconv pulls several Bioconductor deps; install once then snapshot:
-#   renv::install("bioc::immunedeconv"); renv::snapshot()
+#   immunedeconv lives on GitHub (omnideconv/immunedeconv), NOT Bioconductor,
+#   and pulls many Bioc deps. Install once, then snapshot:
+#   Bioconductor repos must be active (immunedeconv deps are Bioc packages):
+#     install.packages("BiocManager")
+#     options(repos = BiocManager::repositories())   # CRAN + all Bioc sub-repos
+#     renv::install("omnideconv/immunedeconv"); renv::snapshot()
+#   # HPC without GitHub access? conda alternative: conda install bioconda::r-immunedeconv
 suppressPackageStartupMessages({
   library(tidyverse)
   library(here)
