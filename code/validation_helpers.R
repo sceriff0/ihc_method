@@ -28,6 +28,31 @@ suppressPackageStartupMessages({
 oi <- c("#0072B2", "#D55E00", "#009E73", "#CC79A7",
         "#E69F00", "#56B4E9", "#F0E442", "#000000")
 
+# Semantic colours for the immune "hot/cold" phenotype: HOT -> red, COLD -> light
+# blue, intermediate/other -> orange/grey. Robust to case/spelling. Returns a
+# named vector keyed by the given levels, for scale_colour_manual/scale_fill_manual.
+hotcold_cols <- function(levels) {
+  lv  <- as.character(levels)
+  key <- toupper(trimws(lv))
+  col <- dplyr::case_when(
+    grepl("HOT|INFLAM", key)               ~ "#D7191C",  # red
+    grepl("COLD|DESERT", key)              ~ "#74ADD1",  # light blue
+    grepl("INTERMED|VARI|MIX|EXCLUD", key) ~ "#FDAE61",  # orange
+    TRUE                                   ~ "grey65"
+  )
+  stats::setNames(col, lv)
+}
+
+# Order immune-phenotype levels cold -> intermediate -> hot (axis/legend order).
+hotcold_order <- function(x) {
+  lv   <- unique(as.character(x[!is.na(x)]))
+  key  <- toupper(trimws(lv))
+  rank <- ifelse(grepl("COLD|DESERT", key), 1L,
+          ifelse(grepl("INTERMED|VARI|MIX|EXCLUD", key), 2L,
+          ifelse(grepl("HOT|INFLAM", key), 3L, 4L)))
+  factor(x, levels = lv[order(rank)])
+}
+
 # Publication theme: generous type, restrained gridlines, bold titles, grey
 # subtitles/captions, top-left legend. Apply per-Rmd with theme_set(theme_paper).
 theme_paper <- ggplot2::theme_minimal(base_size = 12) +
@@ -195,8 +220,11 @@ read_polygon_geojson <- function(path) {
       stop(sprintf("unsupported geometry type: %s", g$type))
     }
   })
-  # planar image pixel coordinates -> no CRS; dissolve to one geometry
-  sf::st_union(sf::st_sfc(geoms))
+  # planar image pixel coordinates -> no CRS; dissolve to one geometry.
+  # st_make_valid: QuPath annotation rings are often self-intersecting, and
+  # st_within() silently returns NO matches on an invalid polygon (every cell
+  # reads as outside). Repairing the geometry is what makes point-in-polygon work.
+  sf::st_make_valid(sf::st_union(sf::st_sfc(geoms)))
 }
 
 # Load every annotation polygon under `dir`, keyed by patient and annotation index
@@ -229,31 +257,58 @@ load_annotations <- function(dir = here::here("data", "annotation"),
 }
 
 # --- Cell-in-annotation metrics ---------------------------------------------
-# Ratio metrics for one set of cells that fall inside a region (mirrors ATTEND's
-# tumor_over_all / cd45_over_inside plus lineage composition). Returns one row.
+# Lineages tracked in every region (immune subsets + stroma).
+region_lineages <- c("CD8T", "CD4T", "Treg", "NK", "Immune_other", "Stroma")
+
+# Per-region counts + ratios for one set of cells inside a region. Emits the three
+# ATTEND denominators as raw counts (n_inside / n_tumor_inside / n_cd45_inside) and
+# per-lineage counts (n_<lineage>), so composition can be normalised any of ATTEND's
+# three ways downstream (see region_composition()). `frac_<lineage>` is the default
+# normalisation (per all cells inside). Returns one row.
 region_ratios <- function(cells) {
   n_inside <- nrow(cells)
-  if (n_inside == 0) {
-    return(tibble::tibble(n_inside = 0L, tumor_over_inside = NA_real_,
-                          cd45_over_inside = NA_real_, frac_CD8T = NA_real_,
-                          frac_CD4T = NA_real_, frac_Treg = NA_real_,
-                          frac_NK = NA_real_, frac_Stroma = NA_real_))
-  }
-  pc       <- tidyr::replace_na(cells$phenotype_clean, "")
-  is_tumor <- stringr::str_detect(pc, "Tumor")
-  is_cd45  <- is_pos(cells$CD45_sign)
-  lin      <- dplyr::left_join(tibble::tibble(phenotype_clean = cells$phenotype_clean),
-                               phenotype_lineage, by = "phenotype_clean")$lineage
-  frac <- function(l) sum(lin == l, na.rm = TRUE) / n_inside
+  is_tumor <- if (n_inside) stringr::str_detect(tidyr::replace_na(cells$phenotype_clean, ""), "Tumor") else logical(0)
+  is_cd45  <- if (n_inside) is_pos(cells$CD45_sign) else logical(0)
+  lin      <- if (n_inside)
+    dplyr::left_join(tibble::tibble(phenotype_clean = cells$phenotype_clean),
+                     phenotype_lineage, by = "phenotype_clean")$lineage else character(0)
+  n_tumor  <- sum(is_tumor, na.rm = TRUE)
+  n_cd45   <- sum(is_cd45,  na.rm = TRUE)
+  ncount   <- function(l) sum(lin == l, na.rm = TRUE)
+  safe     <- function(num, den) if (den > 0) num / den else NA_real_
 
-  tibble::tibble(
+  out <- tibble::tibble(
     n_inside          = n_inside,
-    tumor_over_inside = sum(is_tumor, na.rm = TRUE) / n_inside,
-    cd45_over_inside  = sum(is_cd45,  na.rm = TRUE) / n_inside,
-    frac_CD8T = frac("CD8T"), frac_CD4T = frac("CD4T"),
-    frac_Treg = frac("Treg"), frac_NK   = frac("NK"),
-    frac_Stroma = frac("Stroma")
+    n_tumor_inside    = n_tumor,
+    n_cd45_inside     = n_cd45,
+    tumor_over_inside = safe(n_tumor, n_inside),
+    cd45_over_inside  = safe(n_cd45,  n_inside)
   )
+  for (l in region_lineages) out[[paste0("n_", l)]]    <- ncount(l)
+  for (l in region_lineages) out[[paste0("frac_", l)]] <- safe(ncount(l), n_inside)
+  out
+}
+
+# ATTEND-style multi-normalisation composition (mirrors code/attend_ihc.R
+# ihc_celltype_metrics). From a region-metrics table (rows from region_ratios,
+# carrying patient_id/n_* counts), returns LONG per lineage with the same three
+# denominators ATTEND uses:
+#   frac_inside = lineage / all cells inside   (overall composition)
+#   frac_tumor  = lineage / tumour cells inside (immune-to-tumour density)
+#   frac_cd45   = lineage / CD45+ cells inside  (composition of the immune compartment)
+region_composition <- function(region_metrics,
+                               lineages = c("CD8T", "CD4T", "Treg", "NK", "Immune_other")) {
+  id_cols <- intersect(c("patient_id", "annotation", "source"), names(region_metrics))
+  region_metrics |>
+    dplyr::select(dplyr::all_of(c(id_cols, "n_inside", "n_tumor_inside", "n_cd45_inside")),
+                  dplyr::all_of(paste0("n_", lineages))) |>
+    tidyr::pivot_longer(dplyr::all_of(paste0("n_", lineages)),
+                        names_to = "lineage", names_prefix = "n_", values_to = "n_cell") |>
+    dplyr::mutate(
+      frac_inside = dplyr::if_else(n_inside       > 0, n_cell / n_inside,       NA_real_),
+      frac_tumor  = dplyr::if_else(n_tumor_inside > 0, n_cell / n_tumor_inside, NA_real_),
+      frac_cd45   = dplyr::if_else(n_cd45_inside  > 0, n_cell / n_cd45_inside,  NA_real_)
+    )
 }
 
 # TRUE where a FlowPath `Out_of_annotation` value marks a cell OUTSIDE the region.

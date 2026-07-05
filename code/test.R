@@ -19,7 +19,7 @@ neoplastic_data <- tribble(
   "052",                70,            50,            NA,
   "046",                50,            60,            50,
   "5456",               70,            80,            70,
-  "103382",              75,            NA,            NA
+  "10338",               75,            NA,            NA
 )
 
 counts_data <-  counts(dds, normalized = TRUE) |>

@@ -101,6 +101,14 @@ cc_union <- ihc_tumor_union |>
   filter(!is.na(tumor_over_inside), !is.na(path_frac))
 
 cat("per-annotation pairs:", nrow(cc_ann), " | union (per-patient) pairs:", nrow(cc_union), "\n")
+
+# Diagnostic: cells found inside each patient's region + how (sf polygon vs CSV
+# fallback). n_inside == 0 (sf) means the point-in-polygon matched no cells for
+# that patient — check the annotation coordinate frame for that slide.
+ihc_tumor_union |>
+  select(patient_id, source, n_inside, tumor_over_inside) |>
+  arrange(n_inside) |>
+  knitr::kable(digits = 3, caption = "Cells inside each patient's tumour region (0 = sf found nothing)")
 ```
 
 ```{r tumor-content-plot}
@@ -187,15 +195,51 @@ if ("immuno_phe" %in% names(infiltrate) &&
   df <- infiltrate |>
     pivot_longer(c(cd45_over_inside, frac_CD8T, frac_CD4T, frac_Treg, frac_NK),
                  names_to = "ihc_metric", values_to = "frac") |>
-    filter(!is.na(immuno_phe), !is.na(frac))
+    filter(!is.na(immuno_phe), !is.na(frac)) |>
+    mutate(immuno_phe = hotcold_order(immuno_phe))   # cold -> intermediate -> hot
   ggplot(df, aes(immuno_phe, frac, colour = immuno_phe)) +
     geom_boxplot(outlier.shape = NA) +
     geom_jitter(width = 0.2, alpha = 0.6) +
     facet_wrap(~ ihc_metric, scales = "free_y") +
+    scale_colour_manual(values = hotcold_cols(levels(df$immuno_phe)),
+                        name = "Immuno-phenotype") +   # hot = red, cold = light blue
     labs(title = "IHC infiltrate metrics by clinical immuno-phenotype",
          subtitle = sprintf("%d patients with both IHC infiltrate and immuno-phenotype",
                             dplyr::n_distinct(df$patient_id)),
          x = NULL, y = "fraction inside tumour region", colour = "Immuno-phenotype") +
+    theme_classic(base_size = 11) +
+    theme(axis.text.x = element_text(angle = 30, hjust = 1))
+}
+```
+
+### Immune composition under three normalizations (ATTEND style)
+
+A cell-type fraction depends entirely on its **denominator**. Following the ATTEND
+analysis, each immune lineage inside the tumour region is normalized three ways:
+
+- **of all cells** (`frac_inside`) — overall composition of the region;
+- **of tumour cells** (`frac_tumor`) — immune-to-tumour density (infiltration relative to tumour burden);
+- **of CD45+ cells** (`frac_cd45`) — composition *within the immune compartment* (what the infiltrate is made of, regardless of how much there is).
+
+```{r infiltrate-composition, fig.height=5}
+comp <- region_composition(ihc_tumor_union) |>
+  pivot_longer(c(frac_inside, frac_tumor, frac_cd45),
+               names_to = "normalization", values_to = "frac") |>
+  mutate(normalization = factor(
+           c(frac_inside = "of all cells", frac_tumor = "of tumour cells",
+             frac_cd45 = "of CD45+ cells")[normalization],
+           levels = c("of all cells", "of tumour cells", "of CD45+ cells"))) |>
+  filter(is.finite(frac))
+
+if (nrow(comp) > 0) {
+  ggplot(comp, aes(lineage, frac, fill = lineage)) +
+    geom_boxplot(outlier.shape = NA, colour = "grey30") +
+    geom_jitter(width = .15, alpha = .5, size = 1) +
+    facet_wrap(~ normalization, scales = "free_y") +
+    scale_fill_manual(values = oi, guide = "none") +
+    labs(title = "IHC immune composition inside the tumour region",
+         subtitle = "Same counts, three denominators — the fraction you read depends on which you pick.",
+         x = NULL, y = "fraction", caption = "denominators: all cells / tumour cells / CD45+ cells inside") +
     theme_classic(base_size = 11) +
     theme(axis.text.x = element_text(angle = 30, hjust = 1))
 }
