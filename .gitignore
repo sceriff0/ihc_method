@@ -10,3 +10,8 @@ analysis/*html
 analysis/*_cache
 analysis/site_libs
 data/*
+.citadel/
+.claude/
+AGENTS.md
+CLAUDE.md
+specs/

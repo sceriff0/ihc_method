@@ -1,15 +1,155 @@
 ---
 title: "deconvolution"
 author: "sceriff0"
-date: "2026-06-30"
+date: "2026-07-05"
 output: workflowr::wflow_html
 editor_options:
   chunk_output_type: console
 ---
 
-## Introduction
+```{r setup, include=FALSE}
+# renv: needs immunedeconv (multi-method deconvolution) + tidyverse, here.
+#   immunedeconv pulls several Bioconductor deps; install once then snapshot:
+#   renv::install("bioc::immunedeconv"); renv::snapshot()
+suppressPackageStartupMessages({
+  library(tidyverse)
+  library(here)
+})
 
-```{r}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE,
+                      fig.width = 9, fig.height = 6)
 
+invisible(capture.output(suppressMessages(source(here("code", "test.R")))))
+source(here("code", "validation_helpers.R"))
 ```
 
+## Purpose
+
+Validate the IHC immune-cell fractions against **bulk-RNA deconvolution**. Run
+several methods via `immunedeconv` (quanTIseq + EPIC give absolute fractions
+directly comparable to IHC; MCPcounter + xCell give relative scores), map each
+method's cell types onto the IHC phenotype lineages, correlate per lineage across
+patients, and rank **which method agrees best with the IHC readout**.
+
+IHC reference = whole-slide lineage fractions from `phenotype_clean` (CD8T, CD4T,
+Treg, NK — the lineages with a clean deconvolution counterpart; the panel has no
+macrophage/B-cell phenotype).
+
+## Bulk-RNA expression matrix
+
+`immunedeconv` wants a gene × sample matrix with gene symbols as row names.
+`counts_data` is DESeq2-normalized (sample × gene); transpose it.
+
+```{r expr-matrix}
+expr_mat <- counts_data |>
+  column_to_rownames("Sample") |>
+  as.matrix() |>
+  t()
+
+storage.mode(expr_mat) <- "double"
+cat("expression matrix:", nrow(expr_mat), "genes x", ncol(expr_mat), "samples\n")
+```
+
+> Caveat: quanTIseq/EPIC are designed for TPM. DESeq2-normalized counts are used
+> here as a pragmatic proxy; absolute fractions are therefore approximate, but the
+> *cross-patient ranking* (what the Spearman validation uses) is robust to this.
+
+## Run deconvolution methods
+
+```{r deconvolve}
+methods <- c("quantiseq", "epic", "mcp_counter", "xcell")
+
+deconv_long <- NULL
+if (requireNamespace("immunedeconv", quietly = TRUE)) {
+  safe_deconv <- purrr::possibly(function(m) {
+    immunedeconv::deconvolute(expr_mat, m) |>
+      pivot_longer(-cell_type, names_to = "patient_id", values_to = "score") |>
+      mutate(method = m)
+  }, otherwise = NULL, quiet = FALSE)
+
+  deconv_long <- purrr::map(methods, safe_deconv) |>
+    purrr::compact() |>
+    bind_rows() |>
+    mutate(patient_id = norm_id(patient_id),
+           lineage    = deconv_to_lineage(cell_type))
+  cat("deconvolution rows:", nrow(deconv_long),
+      "across", dplyr::n_distinct(deconv_long$method), "methods\n")
+} else {
+  message("immunedeconv not installed — install it to run this report.")
+}
+```
+
+## IHC lineage fractions (reference)
+
+```{r ihc-lineages}
+ihc_lin <- ihc_lineage_fraction(ihc_data) |>
+  filter(lineage %in% comparable_lineages) |>
+  select(patient_id, lineage, ihc_frac = frac)
+
+cat("IHC patients with lineage fractions:", dplyr::n_distinct(ihc_lin$patient_id), "\n")
+```
+
+## Method vs IHC — per-lineage concordance
+
+For each method, collapse its cell types to the four comparable lineages (sum
+where a method splits a lineage, e.g. quanTIseq's M1/M2 do not map here), join to
+the IHC fraction on patient + lineage, and correlate across patients.
+
+```{r concordance}
+paired <- NULL
+if (!is.null(deconv_long) && nrow(deconv_long) > 0) {
+  deconv_lin <- deconv_long |>
+    filter(!is.na(lineage)) |>
+    group_by(method, patient_id, lineage) |>
+    summarise(score = sum(score), .groups = "drop")
+
+  paired <- deconv_lin |>
+    inner_join(ihc_lin, by = c("patient_id", "lineage")) |>
+    filter(is.finite(score), is.finite(ihc_frac))
+  cat("paired (method x lineage x patient) rows:", nrow(paired), "\n")
+}
+```
+
+```{r concordance-table}
+if (!is.null(paired) && nrow(paired) > 0) {
+  summary_tbl <- paired |>
+    group_by(method, lineage) |>
+    group_modify(~ paired_spearman(.x$score, .x$ihc_frac)) |>
+    ungroup() |>
+    arrange(lineage, desc(rho))
+  knitr::kable(summary_tbl, digits = 3,
+               caption = "Spearman IHC vs deconvolution, per method and lineage")
+
+  # Which method agrees best overall (mean rho across lineages).
+  method_rank <- summary_tbl |>
+    group_by(method) |>
+    summarise(mean_rho = mean(rho, na.rm = TRUE),
+              n_lineages = sum(is.finite(rho)), .groups = "drop") |>
+    arrange(desc(mean_rho))
+  knitr::kable(method_rank, digits = 3,
+               caption = "Method ranking by mean Spearman across lineages")
+}
+```
+
+```{r concordance-plot}
+if (!is.null(paired) && nrow(paired) > 0) {
+  ggplot(paired, aes(ihc_frac, score)) +
+    geom_point(alpha = 0.6, size = 1.8) +
+    geom_smooth(method = "lm", se = FALSE, colour = "steelblue", formula = y ~ x) +
+    facet_grid(method ~ lineage, scales = "free") +
+    labs(title = "IHC lineage fraction vs bulk-RNA deconvolution score",
+         x = "IHC fraction of all cells", y = "deconvolution score") +
+    theme_bw(base_size = 10)
+}
+```
+
+## Notes
+
+- Absolute-fraction methods (quanTIseq, EPIC) are the fair apples-to-apples
+  comparison; MCPcounter/xCell scores are relative, so only their *rank*
+  correlation with IHC is meaningful, not the slope.
+- Only CD8T / CD4T / Treg / NK are compared — the IHC panel has no macrophage or
+  B-cell phenotype, so those deconvolution outputs have no phenotype-level IHC
+  counterpart (see `bulkRna.Rmd` for a marker-level CD163/CD14 check instead).
+- Cross-patient Spearman needs ≥ 3 shared patients per lineage; sparser cells
+  return `NA` rather than a spurious correlation.

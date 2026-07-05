@@ -7,7 +7,6 @@ library("data.table")
 
 dds <- get(load(here("data", "counts.RData")))
 dds <- DESeq(dds)
-dds <- estimateSizeFactors(dds)
 
 clinical_data <- read_excel(here("data", "clinical_data.xlsx")) |>
   filter(!is.na(`ID PATIENT`)) |>

@@ -1,15 +1,363 @@
 ---
 title: "clinical_data"
 author: "sceriff0"
-date: "2026-06-30"
+date: "2026-07-05"
 output: workflowr::wflow_html
 editor_options:
   chunk_output_type: console
 ---
 
-## Introduction
+```{r setup, include=FALSE}
+# renv: needs sf + jsonlite for the geojson point-in-polygon (+ tidyverse, here).
+#   renv::install(c("sf", "jsonlite")); renv::snapshot()
+#   Survival QC additionally uses survival + survminer (guarded at use):
+#   renv::install(c("survival", "survminer")); renv::snapshot()
+suppressPackageStartupMessages({
+  library(tidyverse)
+  library(here)
+  library(sf)
+})
 
-```{r}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE,
+                      fig.width = 9, fig.height = 6)
 
+# Loaders (dds, clinical_data, neoplastic_data, counts_data, ihc_data) and the
+# shared validation helpers. test.R prints colnames() on load; silence it.
+invisible(capture.output(suppressMessages(source(here("code", "test.R")))))
+source(here("code", "validation_helpers.R"))
 ```
 
+## Purpose
+
+Validate the FlowPath IHC readout against the **pathologist**. Two independent
+checks:
+
+1. **Neoplastic cellularity** — IHC tumour fraction inside each annotation vs the
+   pathologist's `neoplastic_data` estimate. Cell membership in the annotation is
+   recomputed from the raw geojson with `sf` (not the CSV `Out_of_annotation`
+   flag), and reported both per-annotation and over the dissolved union.
+2. **Immune infiltrate** — IHC CD45/lineage fractions inside the tumour region vs
+   the clinical `HOT score` / `Immuno-phenotype`.
+3. **Biological-validity QC** — do the IHC-derived metrics behave the way real
+   biology predicts against the wider clinical table? Three cross-checks:
+   peripheral-blood immunity (lymphocytes / NLR / PNI), induction-treatment
+   `RESPONSE`, and **survival** (`OS`, `PFS`). A genuine immune readout should
+   track peripheral lymphocytes, better response, and longer survival.
+
+Tumour cell = `phenotype_clean` containing "Tumor" (`PANCK+Tumor`, `VIM+Tumor`).
+
+Checks 1–2 use the annotation region (sf); check 3 uses **whole-slide** IHC immune
+metrics so it covers every imaged patient, not only the handful with pathologist
+annotations.
+
+## Load annotations and assign cells (sf point-in-polygon)
+
+```{r annotations}
+# Only need annotations for patients the pathologist scored.
+neo_ids <- norm_id(neoplastic_data$SAMPLE)
+annots  <- load_annotations(patient_ids = neoplastic_data$SAMPLE)
+
+cat("annotation polygons loaded:", nrow(annots),
+    "for", dplyr::n_distinct(annots$patient_id), "patients\n")
+
+ihc_ids    <- unique(norm_id(ihc_data$patient_id))
+shared_ids <- intersect(neo_ids, ihc_ids)
+cat("patients with BOTH IHC cells and pathologist score:", length(shared_ids), "\n")
+if (length(shared_ids) == 0)
+  warning("no overlap between ihc_data patients and neoplastic_data — check IDs")
+```
+
+## Tumour content — IHC vs pathologist
+
+The pathologist scores tumour content per annotation (`ANNOTATION_1..3`). Compare
+against the IHC tumour fraction computed inside the matching polygon.
+
+```{r tumor-content}
+ihc_tumor_per_ann <- ihc_annotation_metrics(ihc_data, annots, scope = "per_annotation")
+ihc_tumor_union   <- ihc_annotation_metrics(ihc_data, annots, scope = "union")
+
+path_long <- neoplastic_data |>
+  mutate(patient_id = norm_id(SAMPLE)) |>
+  pivot_longer(starts_with("ANNOTATION_"),
+               names_to = "annotation", values_to = "path_pct") |>
+  filter(!is.na(path_pct)) |>
+  mutate(path_frac = path_pct / 100)
+
+# Per-annotation concordance (join on patient + annotation index).
+cc_ann <- ihc_tumor_per_ann |>
+  inner_join(path_long, by = c("patient_id", "annotation")) |>
+  filter(!is.na(tumor_over_inside), !is.na(path_frac))
+
+# Union concordance: pathologist reference = mean of that patient's annotations.
+path_union <- path_long |>
+  group_by(patient_id) |>
+  summarise(path_frac = mean(path_frac), .groups = "drop")
+cc_union <- ihc_tumor_union |>
+  inner_join(path_union, by = "patient_id") |>
+  filter(!is.na(tumor_over_inside), !is.na(path_frac))
+
+cat("per-annotation pairs:", nrow(cc_ann), " | union (per-patient) pairs:", nrow(cc_union), "\n")
+```
+
+```{r tumor-content-plot}
+plot_concordance <- function(df, subtitle) {
+  st <- paired_spearman(df$tumor_over_inside, df$path_frac)
+  ggplot(df, aes(tumor_over_inside, path_frac)) +
+    geom_abline(slope = 1, linetype = "dashed", colour = "red") +
+    geom_point(alpha = 0.7, size = 2) +
+    coord_equal(xlim = c(0, 1), ylim = c(0, 1)) +
+    annotate("text", x = 0, y = 1, hjust = 0, vjust = 1,
+             label = sprintf("Spearman rho = %.2f (p = %.3g, n = %d)",
+                             st$rho, st$p, st$n)) +
+    labs(title = "Neoplastic cellularity: IHC vs pathologist", subtitle = subtitle,
+         x = "IHC tumour fraction inside annotation",
+         y = "Pathologist tumour fraction") +
+    theme_classic(base_size = 12)
+}
+
+if (nrow(cc_ann)   > 0) print(plot_concordance(cc_ann,   "per annotation"))
+if (nrow(cc_union) > 0) print(plot_concordance(cc_union, "union of a patient's annotations"))
+```
+
+Bland–Altman agreement (both quantities are on the same 0–1 scale, so the
+difference vs mean shows systematic bias, not just rank correlation).
+
+```{r tumor-content-bland-altman}
+if (nrow(cc_union) > 2) {
+  ba <- cc_union |>
+    transmute(mean_val = (tumor_over_inside + path_frac) / 2,
+              diff_val = tumor_over_inside - path_frac)
+  bias <- mean(ba$diff_val); loa <- 1.96 * sd(ba$diff_val)
+  ggplot(ba, aes(mean_val, diff_val)) +
+    geom_hline(yintercept = bias, colour = "blue") +
+    geom_hline(yintercept = bias + c(-loa, loa), linetype = "dashed", colour = "grey40") +
+    geom_point(alpha = 0.7, size = 2) +
+    labs(title = "Bland–Altman: IHC − pathologist tumour fraction",
+         subtitle = sprintf("bias = %.3f, limits of agreement +/- %.3f", bias, loa),
+         x = "mean of the two", y = "IHC − pathologist") +
+    theme_classic(base_size = 12)
+}
+```
+
+## Immune infiltrate — IHC vs clinical immune phenotype
+
+IHC immune infiltrate = CD45+ (and lineage) fractions inside the tumour region
+(union of annotations). Compare against the clinician's `HOT score` (continuous)
+and `Immuno-phenotype` (categorical).
+
+```{r infiltrate-join}
+clin <- clinical_data |>
+  mutate(patient_id = norm_id(`ID CRF PRESERVE`)) |>
+  select(patient_id,
+         hot_score  = any_of("HOT score"),
+         immuno_phe = any_of("Immuno-phenotype"))
+
+infiltrate <- ihc_tumor_union |>
+  select(patient_id, cd45_over_inside, frac_CD8T, frac_CD4T, frac_Treg, frac_NK) |>
+  inner_join(clin, by = "patient_id")
+
+cat("patients with IHC infiltrate + clinical immune phenotype:", nrow(infiltrate), "\n")
+```
+
+```{r infiltrate-hotscore}
+if ("hot_score" %in% names(infiltrate) &&
+    sum(is.finite(suppressWarnings(as.numeric(infiltrate$hot_score)))) > 2) {
+  df <- infiltrate |> mutate(hot_score = suppressWarnings(as.numeric(hot_score)))
+  st <- paired_spearman(df$cd45_over_inside, df$hot_score)
+  ggplot(df, aes(cd45_over_inside, hot_score)) +
+    geom_point(alpha = 0.7, size = 2) +
+    geom_smooth(method = "lm", se = FALSE, colour = "steelblue", formula = y ~ x) +
+    annotate("text", x = -Inf, y = Inf, hjust = -0.1, vjust = 1.5,
+             label = sprintf("Spearman rho = %.2f (p = %.3g, n = %d)",
+                             st$rho, st$p, st$n)) +
+    labs(title = "Immune infiltrate vs clinical HOT score",
+         x = "IHC CD45+ fraction inside tumour region", y = "clinical HOT score") +
+    theme_classic(base_size = 12)
+}
+```
+
+```{r infiltrate-phenotype}
+if ("immuno_phe" %in% names(infiltrate) &&
+    dplyr::n_distinct(na.omit(infiltrate$immuno_phe)) > 1) {
+  df <- infiltrate |>
+    pivot_longer(c(cd45_over_inside, frac_CD8T, frac_CD4T, frac_Treg, frac_NK),
+                 names_to = "ihc_metric", values_to = "frac") |>
+    filter(!is.na(immuno_phe), !is.na(frac))
+  ggplot(df, aes(immuno_phe, frac, colour = immuno_phe)) +
+    geom_boxplot(outlier.shape = NA) +
+    geom_jitter(width = 0.2, alpha = 0.6) +
+    facet_wrap(~ ihc_metric, scales = "free_y") +
+    labs(title = "IHC infiltrate metrics by clinical immuno-phenotype",
+         x = NULL, y = "fraction inside tumour region", colour = "Immuno-phenotype") +
+    theme_classic(base_size = 11) +
+    theme(axis.text.x = element_text(angle = 30, hjust = 1))
+}
+```
+
+## Biological-validity QC — IHC immune readout vs the wider clinical table
+
+Whole-slide IHC immune metrics per patient (covers every imaged patient, not just
+the annotated ones): lineage fractions over all cells plus CD45/CD8/FOXP3
+positive-cell fractions.
+
+```{r whole-slide-immune}
+ihc_lin <- ihc_lineage_fraction(ihc_data) |>
+  filter(lineage %in% comparable_lineages) |>
+  select(patient_id, lineage, frac) |>
+  pivot_wider(names_from = lineage, values_from = frac, values_fill = 0)
+
+ihc_mk <- ihc_marker_fraction(ihc_data) |>
+  select(patient_id, any_of(c("CD45_posfrac", "CD8_posfrac", "FOXP3_posfrac")))
+
+ihc_immune <- full_join(ihc_lin, ihc_mk, by = "patient_id")
+
+# Full clinical table on the shared key. Keep the columns the QC below uses.
+clin_full <- clinical_data |>
+  mutate(patient_id = norm_id(`ID CRF PRESERVE`))
+
+ihc_clin <- ihc_immune |> inner_join(clin_full, by = "patient_id")
+cat("patients with whole-slide IHC immune metrics + clinical row:", nrow(ihc_clin), "\n")
+
+# Primary IHC immune summary used throughout: CD45+ fraction if present, else CD8T.
+# Guarded because a lineage that never occurs would leave no pivoted column.
+score_col <- intersect(c("CD45_posfrac", "CD8T"), names(ihc_clin))[1]
+ihc_clin$ihc_immune_score <- if (!is.na(score_col)) ihc_clin[[score_col]] else NA_real_
+```
+
+### Tissue vs peripheral-blood immunity
+
+A real tissue immune infiltrate should track the patient's circulating lymphocytes
+and run opposite to the neutrophil-to-lymphocyte ratio (NLR); the prognostic
+nutritional index (PNI) is a related systemic-immunity/nutrition score.
+
+```{r blood-immunity}
+blood <- ihc_clin |>
+  transmute(
+    patient_id, ihc_immune_score,
+    lymphocytes = suppressWarnings(as.numeric(`BASAL VALUE OF LYMPHOCYTES`)),
+    neutrophils = suppressWarnings(as.numeric(`BASAL VALUE OF NEUTROPHILS`)),
+    pni         = suppressWarnings(as.numeric(`PROGNOSTIC NUTRITIONAL INDEX`))
+  ) |>
+  mutate(nlr = neutrophils / lymphocytes)
+
+blood_long <- blood |>
+  pivot_longer(c(lymphocytes, nlr, pni), names_to = "blood_metric", values_to = "value") |>
+  filter(is.finite(ihc_immune_score), is.finite(value))
+
+if (nrow(blood_long) > 2) {
+  labs_tbl <- blood_long |>
+    group_by(blood_metric) |>
+    group_modify(~ paired_spearman(.x$ihc_immune_score, .x$value)) |>
+    mutate(lab = sprintf("rho = %.2f (p = %.3g, n = %d)", rho, p, n))
+  ggplot(blood_long, aes(ihc_immune_score, value)) +
+    geom_point(alpha = 0.7, size = 2) +
+    geom_smooth(method = "lm", se = FALSE, colour = "steelblue", formula = y ~ x) +
+    geom_text(data = labs_tbl, aes(x = -Inf, y = Inf, label = lab),
+              hjust = -0.05, vjust = 1.4, inherit.aes = FALSE, size = 3) +
+    facet_wrap(~ blood_metric, scales = "free_y") +
+    labs(title = "IHC immune score vs peripheral-blood immunity",
+         x = "IHC immune score (CD45+ fraction)", y = NULL) +
+    theme_classic(base_size = 11)
+}
+```
+
+### Induction-treatment response
+
+Immunologically "hot" tumours tend to respond better to induction chemotherapy.
+
+```{r response}
+if ("RESPONSE" %in% names(ihc_clin)) {
+  df <- ihc_clin |>
+    filter(!is.na(RESPONSE), is.finite(ihc_immune_score)) |>
+    mutate(RESPONSE = fct_infreq(as.character(RESPONSE)))
+  if (dplyr::n_distinct(df$RESPONSE) > 1 && nrow(df) > 3) {
+    ggplot(df, aes(RESPONSE, ihc_immune_score, colour = RESPONSE)) +
+      geom_boxplot(outlier.shape = NA) +
+      geom_jitter(width = 0.2, alpha = 0.6) +
+      labs(title = "IHC immune score by induction response",
+           x = NULL, y = "IHC immune score (CD45+ fraction)") +
+      theme_classic(base_size = 12) +
+      theme(axis.text.x = element_text(angle = 30, hjust = 1), legend.position = "none")
+  }
+}
+```
+
+### Survival — does the IHC immune readout carry prognostic signal?
+
+Kaplan–Meier by median split of the IHC immune score, plus a univariable Cox HR on
+the continuous score, for `OS` and `PFS`.
+
+**Assumption to verify:** the time columns are `OS` / `PFS` (numeric months) and the
+event columns are `FOLLOW UP` (death) / `PERSISTENCE OR RELAPSE?` (progression).
+`coerce_event()` maps common encodings (yes/no, alive/dead, 1/0) to 0/1 — adjust
+`surv_cfg` if your coding differs.
+
+```{r survival}
+surv_cfg <- list(
+  OS  = list(time = "OS",  event = "FOLLOW UP"),
+  PFS = list(time = "PFS", event = "PERSISTENCE OR RELAPSE?")
+)
+
+coerce_event <- function(x) {
+  if (is.numeric(x)) return(as.integer(x > 0))
+  v <- tolower(trimws(as.character(x)))
+  dplyr::case_when(
+    v %in% c("1","yes","y","dead","death","deceased","event","relapse",
+             "progression","progressed","true") ~ 1L,
+    v %in% c("0","no","n","alive","ned","censored","false") ~ 0L,
+    TRUE ~ NA_integer_
+  )
+}
+
+run_survival <- function(cfg, label) {
+  if (!requireNamespace("survival", quietly = TRUE)) {
+    message("survival package not installed — skipping ", label); return(invisible())
+  }
+  if (!all(c(cfg$time, cfg$event) %in% names(ihc_clin))) {
+    message("missing ", cfg$time, "/", cfg$event, " — skipping ", label); return(invisible())
+  }
+  d <- ihc_clin |>
+    transmute(ihc_immune_score,
+              .time  = suppressWarnings(as.numeric(.data[[cfg$time]])),
+              .event = coerce_event(.data[[cfg$event]])) |>
+    filter(is.finite(.time), !is.na(.event), is.finite(ihc_immune_score))
+  if (nrow(d) < 5 || dplyr::n_distinct(d$.event) < 2) {
+    message("too few informative rows for ", label, " (n = ", nrow(d), ")"); return(invisible())
+  }
+  d <- d |> mutate(immune_group = if_else(ihc_immune_score >= median(ihc_immune_score),
+                                          "IHC-immune high", "IHC-immune low"))
+  fit  <- survival::survfit(survival::Surv(.time, .event) ~ immune_group, data = d)
+  cox  <- survival::coxph(survival::Surv(.time, .event) ~ ihc_immune_score, data = d)
+  hr   <- exp(stats::coef(cox))[1]; pcox <- summary(cox)$coefficients[1, "Pr(>|z|)"]
+  cat(sprintf("%s: Cox HR per unit IHC immune score = %.2f (p = %.3g, n = %d)\n",
+              label, hr, pcox, nrow(d)))
+  if (requireNamespace("survminer", quietly = TRUE)) {
+    print(survminer::ggsurvplot(fit, data = d, pval = TRUE, risk.table = TRUE,
+                                title = paste(label, "by IHC immune score (median split)"),
+                                legend.title = "")$plot)
+  } else {
+    plot(fit, col = c("firebrick", "steelblue"), xlab = "time", ylab = "survival",
+         main = paste(label, "by IHC immune score"))
+    legend("topright", levels(factor(d$immune_group)),
+           col = c("firebrick", "steelblue"), lty = 1, bty = "n")
+  }
+}
+
+invisible(purrr::iwalk(surv_cfg, ~ run_survival(.x, .y)))
+```
+
+## Notes
+
+- Cohorts are small (the pathologist scored a handful of slides); Spearman is used
+  throughout and every correlation reports its `n`. Read associations as
+  descriptive, not inferential.
+- Per-annotation vs union: per-annotation tests each scored region directly; the
+  union collapses a patient to one tumour-content value (pathologist reference =
+  mean of their annotations).
+- Membership is `sf::st_within` on the raw geojson — a cell counts as inside only
+  if its centroid falls in the polygon, independent of the CSV flag.
+- Biological-validity QC (blood / response / survival) is exploratory and
+  underpowered at this cohort size — it checks the *direction* the IHC immune
+  readout points (with peripheral lymphocytes, with response, with survival), not
+  statistical significance. Confirm the `surv_cfg` time/event columns match your
+  data coding before trusting the KM/Cox output.

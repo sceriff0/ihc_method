@@ -1,15 +1,140 @@
 ---
 title: "bulkRna"
 author: "sceriff0"
-date: "2026-06-30"
+date: "2026-07-05"
 output: workflowr::wflow_html
 editor_options:
   chunk_output_type: console
 ---
 
-## Introduction
+```{r setup, include=FALSE}
+# renv: tidyverse + here (already in the lockfile).
+suppressPackageStartupMessages({
+  library(tidyverse)
+  library(here)
+})
 
-```{r}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE,
+                      fig.width = 9, fig.height = 6)
 
+invisible(capture.output(suppressMessages(source(here("code", "test.R")))))
+source(here("code", "validation_helpers.R"))
 ```
 
+## Purpose
+
+Cross-modality validation of the IHC readout against **bulk-RNA marker genes**: if
+IHC protein positivity is real, the fraction of cells positive for a marker should
+track the bulk-RNA expression of that marker's gene across patients. This is the
+most direct check — one protein against its own transcript — and needs no
+deconvolution model.
+
+For each IHC marker we take its canonical gene(s) (`marker_gene_map`), average
+multi-gene markers, and correlate bulk expression vs the per-patient fraction of
+`<marker>_sign == "+"` cells.
+
+## Per-patient bulk expression of each marker's gene(s)
+
+```{r marker-expression}
+expr_long <- counts_data |>
+  mutate(patient_id = norm_id(Sample)) |>
+  pivot_longer(-c(Sample, patient_id), names_to = "gene", values_to = "expr")
+
+# marker -> its genes, one row per (marker, gene); keep only genes present in RNA.
+marker_genes <- marker_gene_map |>
+  separate_rows(genes, sep = ",") |>
+  rename(gene = genes) |>
+  filter(gene %in% unique(expr_long$gene))
+
+missing <- setdiff(
+  marker_gene_map |> separate_rows(genes, sep = ",") |> pull(genes),
+  unique(expr_long$gene)
+)
+if (length(missing)) message("genes absent from RNA matrix: ", paste(missing, collapse = ", "))
+
+# Per patient, average expression across a marker's available genes.
+marker_expr <- expr_long |>
+  inner_join(marker_genes, by = "gene", relationship = "many-to-many") |>
+  group_by(marker, patient_id) |>
+  summarise(rna_expr = mean(expr), .groups = "drop")
+```
+
+## Per-patient IHC positive-cell fraction
+
+```{r ihc-fraction}
+ihc_frac <- ihc_marker_fraction(ihc_data) |>
+  select(patient_id, ends_with("_posfrac")) |>
+  pivot_longer(-patient_id, names_to = "marker", values_to = "ihc_posfrac") |>
+  mutate(marker = sub("_posfrac$", "", marker))
+
+cat("IHC patients:", dplyr::n_distinct(ihc_frac$patient_id),
+    "| RNA patients:", dplyr::n_distinct(marker_expr$patient_id), "\n")
+```
+
+## Marker-by-marker concordance
+
+```{r concordance}
+paired <- marker_expr |>
+  inner_join(ihc_frac, by = c("marker", "patient_id")) |>
+  filter(is.finite(rna_expr), is.finite(ihc_posfrac))
+
+cat("shared patients (RNA + IHC):",
+    dplyr::n_distinct(paired$patient_id), "\n")
+
+summary_tbl <- paired |>
+  group_by(marker) |>
+  group_modify(~ paired_spearman(.x$ihc_posfrac, .x$rna_expr)) |>
+  ungroup() |>
+  arrange(desc(rho))
+
+knitr::kable(summary_tbl, digits = 3,
+             caption = "Spearman: IHC positive-cell fraction vs bulk-RNA expression")
+```
+
+```{r concordance-plot, fig.height=8}
+if (nrow(paired) > 0) {
+  # log-scale expression (counts span orders of magnitude); +1 to keep zeros.
+  ggplot(paired, aes(ihc_posfrac, log1p(rna_expr))) +
+    geom_point(alpha = 0.6, size = 1.8) +
+    geom_smooth(method = "lm", se = FALSE, colour = "steelblue", formula = y ~ x) +
+    facet_wrap(~ marker, scales = "free") +
+    labs(title = "IHC marker+ fraction vs bulk-RNA expression",
+         x = "IHC fraction of cells positive", y = "log1p(bulk expression)") +
+    theme_bw(base_size = 10)
+}
+```
+
+Sensitivity: the mean marker z-score (continuous staining intensity) instead of the
+positive-cell fraction, in case a hard `_sign` threshold loses signal.
+
+```{r zscore-sensitivity}
+ihc_z <- ihc_marker_fraction(ihc_data) |>
+  select(patient_id, ends_with("_z")) |>
+  pivot_longer(-patient_id, names_to = "marker", values_to = "ihc_z") |>
+  mutate(marker = sub("_z$", "", marker))
+
+paired_z <- marker_expr |>
+  inner_join(ihc_z, by = c("marker", "patient_id")) |>
+  filter(is.finite(rna_expr), is.finite(ihc_z))
+
+if (nrow(paired_z) > 0) {
+  paired_z |>
+    group_by(marker) |>
+    group_modify(~ paired_spearman(.x$ihc_z, .x$rna_expr)) |>
+    ungroup() |>
+    arrange(desc(rho)) |>
+    knitr::kable(digits = 3,
+                 caption = "Spearman: IHC mean z-score vs bulk-RNA expression")
+}
+```
+
+## Notes
+
+- Expect strong positive correlation for lineage-specific markers (PTPRC/CD45,
+  CD3, CD8A, CD163, NCAM1/CD56) where protein and transcript co-vary; weaker or
+  absent for markers regulated post-transcriptionally or with poor antibody
+  specificity — a low `rho` flags an IHC channel worth auditing.
+- `PANCK` maps to `EPCAM` + keratin genes (averaged); `SMA`→`ACTA2`,
+  `CD56`→`NCAM1`, `PDL1`→`CD274`, `PD1`→`PDCD1`, `FSP1`→`S100A4`. `wrongL1CAM` is
+  excluded by construction.
+- Correlations are cross-patient and small-n; every row carries its `n`.
