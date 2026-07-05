@@ -93,6 +93,20 @@ id_crosswalk <- function(clinical_data,
   unique(tibble::tibble(slide_id = slide[keep], crf_id = crf[keep]))
 }
 
+# Named vector  crf_id -> slide_id  built DIRECTLY from clinical_data (base R: no
+# tibble, no join). Map bulk-RNA (CRF space) sample ids to IHC slide ids with
+# `slide[crf_id]`. Prefer this over id_crosswalk() + join in the RNA reports —
+# dplyr join column-propagation is unreliable on this project's dplyr build.
+crf_to_slide_map <- function(clinical_data,
+                             patient_col = "ID PATIENT",
+                             crf_col     = "ID CRF PRESERVE",
+                             slide_id_fixes = SLIDE_ID_FIXES) {
+  slide <- slide_key(clinical_data[[patient_col]], slide_id_fixes)
+  crf   <- norm_id(clinical_data[[crf_col]])
+  keep  <- !is.na(slide) & !is.na(crf) & slide != "" & crf != ""
+  stats::setNames(slide[keep], crf[keep])
+}
+
 # TRUE where a FlowPath `<marker>_sign` column marks a positive cell. The
 # FlowPath export uses "+"; the alternatives guard against encoding drift.
 is_pos <- function(x) {

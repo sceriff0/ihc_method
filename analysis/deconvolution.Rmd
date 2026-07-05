@@ -64,8 +64,9 @@ cat("expression matrix:", nrow(expr_mat), "genes x", ncol(expr_mat), "samples\n"
 ```{r deconvolve}
 methods <- c("quantiseq", "epic", "mcp_counter", "xcell")
 
-# Bulk RNA samples are in CRF-id space; IHC is slide-id space. Bridge via clinical.
-xwalk <- id_crosswalk(clinical_data)
+# Bulk RNA samples are in CRF-id space; IHC is slide-id space. Bridge via clinical
+# with a base-R named-vector lookup (crf id -> slide id), NOT a join.
+crf2slide <- crf_to_slide_map(clinical_data)
 
 deconv_long <- NULL
 if (requireNamespace("immunedeconv", quietly = TRUE)) {
@@ -78,13 +79,12 @@ if (requireNamespace("immunedeconv", quietly = TRUE)) {
   deconv_long <- purrr::map(methods, safe_deconv) |>
     purrr::compact() |>
     bind_rows() |>
-    mutate(crf_id  = norm_id(sample),
-           lineage = deconv_to_lineage(cell_type)) |>
-    left_join(xwalk, by = "crf_id")            # crf_id -> slide_id
+    mutate(crf_id     = norm_id(sample),
+           patient_id = unname(crf2slide[crf_id]),   # crf id -> slide id
+           lineage    = deconv_to_lineage(cell_type))
 
-  n_unmapped <- deconv_long |> distinct(crf_id, slide_id) |>
-    filter(is.na(slide_id)) |> nrow()
-  deconv_long <- deconv_long |> filter(!is.na(slide_id)) |> rename(patient_id = slide_id)
+  n_unmapped  <- dplyr::n_distinct(deconv_long$crf_id[is.na(deconv_long$patient_id)])
+  deconv_long <- deconv_long |> filter(!is.na(patient_id))
 
   cat("deconvolution rows:", nrow(deconv_long),
       "across", dplyr::n_distinct(deconv_long$method), "methods;",

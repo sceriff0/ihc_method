@@ -36,8 +36,9 @@ multi-gene markers, and correlate bulk expression vs the per-patient fraction of
 ## Per-patient bulk expression of each marker's gene(s)
 
 ```{r marker-expression}
-# RNA samples are CRF-id space; bridge to IHC slide-id space via clinical.
-xwalk <- id_crosswalk(clinical_data)
+# RNA samples are CRF-id space; bridge to IHC slide-id space via clinical
+# (base-R named-vector lookup, not a join).
+crf2slide <- crf_to_slide_map(clinical_data)
 
 expr_long <- counts_data |>
   mutate(crf_id = norm_id(Sample)) |>
@@ -61,8 +62,9 @@ marker_expr <- expr_long |>
   inner_join(marker_genes, by = "gene", relationship = "many-to-many") |>
   group_by(marker, crf_id) |>
   summarise(rna_expr = mean(expr), .groups = "drop") |>
-  inner_join(xwalk, by = "crf_id") |>
-  transmute(marker, patient_id = slide_id, rna_expr)
+  mutate(patient_id = unname(crf2slide[crf_id])) |>   # crf id -> slide id
+  filter(!is.na(patient_id)) |>
+  select(marker, patient_id, rna_expr)
 ```
 
 ## Per-patient IHC positive-cell fraction
