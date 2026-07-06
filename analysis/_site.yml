@@ -5,6 +5,8 @@ navbar:
   left:
   - text: Home
     href: index.html
+  - text: Tumour border
+    href: periphery.html
   - text: About
     href: about.html
   - text: License

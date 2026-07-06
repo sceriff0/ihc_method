@@ -524,6 +524,122 @@ deconv_to_lineage <- function(cell_type) {
   )
 }
 
+# =============================================================================
+# Tumour border / periphery (invasive-margin) metrics
+# -----------------------------------------------------------------------------
+# The tumour annotation gives an "inside vs outside" partition; the biology at
+# the tumour-host interface needs a third region — the invasive margin (IM), a
+# band centred on the annotation boundary. Literature grounding for the band
+# half-width `d` (microns each side of the border):
+#   * Consensus Immunoscore (Galon 2014 J Pathol; Pages 2018 Lancet) scores CD3/
+#     CD8 densities in the tumour core (CT) and a 500 um invasive margin (IM) —
+#     the de-facto standard, and the default in QuPath IM workflows.
+#   * Reviews put the IM width in a 200-500 um range, with some invasive-margin
+#     detection algorithms using up to 1000 um.
+#   * Immune spatial phenotypes (Chen & Mellman; Hegde 2016) are defined by WHERE
+#     CD8 sits relative to this border: inflamed/hot = throughout the core,
+#     excluded/cold = trapped at the margin, desert/cold = sparse everywhere.
+# So we report several thresholds (default 100 / 250 / 500 um) and, per threshold,
+# both the margin band and the eroded "deep core" so a margin-vs-core contrast can
+# recover the inflamed/excluded/desert axis.
+#
+# All geometry is done in the polygon's OWN coordinate frame, into which
+# .align_xy() has already mapped the cells. A micron threshold therefore has to be
+# converted to polygon units first (see .poly_um_per_unit).
+
+# Microns per polygon coordinate UNIT, inferred from the .align_xy() method label:
+#   px2um(...) : cells were multiplied by um_per_px to reach the polygon frame, so
+#                the polygon is already in MICRONS            -> 1 um per unit
+#   native / um2px(...) : the polygon frame is PIXELS         -> um_per_px per unit
+# (native is treated as pixels: QuPath geojson exports are pixel-space by default.)
+.poly_um_per_unit <- function(method, um_per_px) {
+  if (grepl("^px2um", method)) 1 else um_per_px
+}
+
+# From a dissolved core polygon (sfc) and a signed buffer distance `d` (polygon
+# units), return the invasive-margin band (+/- d around the boundary) and the
+# eroded interior "deep core" (further than d inside the boundary). If d exceeds
+# the core's inradius the eroded core is empty (sfc of length 0) — the caller
+# treats that as "no deep core at this threshold".
+margin_regions <- function(core, d) {
+  outer <- suppressWarnings(sf::st_buffer(core, d))
+  inner <- suppressWarnings(sf::st_buffer(core, -d))
+  band  <- if (length(inner) == 0 || all(sf::st_is_empty(inner))) outer
+           else suppressWarnings(sf::st_difference(outer, inner))
+  list(margin = band, core = inner)
+}
+
+# region_ratios() augmented with region AREA and area-normalised DENSITIES
+# (cells / mm^2), the native Immunoscore unit. `area_units2` is the region area in
+# squared polygon units; `um_per_unit` converts it to mm^2. Densities are NA when
+# the region is empty/degenerate so they never masquerade as a real zero.
+region_ratios_area <- function(cells, area_units2, um_per_unit) {
+  rr       <- region_ratios(cells)
+  area_mm2 <- area_units2 * (um_per_unit^2) / 1e6         # units^2 -> um^2 -> mm^2
+  dens     <- function(n) if (is.finite(area_mm2) && area_mm2 > 0) n / area_mm2 else NA_real_
+  rr$area_mm2          <- if (area_mm2 > 0) area_mm2 else NA_real_
+  rr$dens_all_per_mm2  <- dens(rr$n_inside)
+  rr$dens_cd45_per_mm2 <- dens(rr$n_cd45_inside)
+  for (l in c("CD8T", "CD4T", "Treg", "NK"))
+    rr[[paste0("dens_", l, "_per_mm2")]] <- dens(rr[[paste0("n_", l)]])
+  rr
+}
+
+# Invasive-margin metrics per patient. For every requested `thresholds_um` and,
+# per `scope`, either the dissolved union (one core) or each single annotation
+# (one core each), returns TWO rows — region = "margin" (the +/- d band) and
+# region = "core" (interior beyond d) — carrying every region_ratios_area column.
+# Only patients WITH a geojson polygon are covered: a margin band cannot be built
+# from the binary CSV Out_of_annotation flag, so there is no CSV fallback here.
+# `um_per_unit` and `source` are echoed so the physical band width is auditable.
+ihc_periphery_metrics <- function(ihc_data, annots,
+                                  scope = c("union", "per_annotation"),
+                                  thresholds_um = c(100, 250, 500),
+                                  um_per_px = 0.325) {
+  scope    <- match.arg(scope)
+  ihc_data <- dplyr::mutate(ihc_data, .pid = slide_key(patient_id))
+  annots   <- dplyr::mutate(annots,   .pid = slide_key(patient_id))
+  ann_ids  <- unique(annots$.pid)
+
+  purrr::map_dfr(intersect(unique(ihc_data$.pid), ann_ids), function(pid) {
+    cells_p <- dplyr::filter(ihc_data, .pid == pid,
+                             is.finite(centroid_x), is.finite(centroid_y))
+    if (nrow(cells_p) == 0) return(tibble::tibble())
+    polys_p <- dplyr::filter(annots, .pid == pid)
+    crs     <- sf::st_crs(polys_p)
+    al      <- .align_xy(cells_p$centroid_x, cells_p$centroid_y, polys_p, crs, um_per_px)
+    upu     <- .poly_um_per_unit(al$method, um_per_px)
+    pts     <- sf::st_as_sf(data.frame(x = al$x, y = al$y), coords = c("x", "y"), crs = crs)
+
+    cores <- if (scope == "union") {
+      list(union = sf::st_union(sf::st_geometry(polys_p)))
+    } else {
+      stats::setNames(lapply(seq_len(nrow(polys_p)),
+                             function(i) sf::st_geometry(polys_p)[i]),
+                      polys_p$annotation)
+    }
+
+    purrr::imap_dfr(cores, function(core, ann_label) {
+      purrr::map_dfr(thresholds_um, function(d_um) {
+        rg <- margin_regions(core, d_um / upu)
+        row_for <- function(region_geom, region_label) {
+          empty  <- length(region_geom) == 0 || all(sf::st_is_empty(region_geom))
+          inside <- if (empty) rep(FALSE, nrow(cells_p))
+                    else lengths(sf::st_within(pts, region_geom)) > 0
+          area_u2 <- if (empty) 0 else as.numeric(sum(sf::st_area(region_geom)))
+          region_ratios_area(cells_p[inside, , drop = FALSE], area_u2, upu) |>
+            dplyr::mutate(region = region_label, .before = 1)
+        }
+        dplyr::bind_rows(row_for(rg$margin, "margin"),
+                         row_for(rg$core,   "core")) |>
+          dplyr::mutate(patient_id = pid, annotation = ann_label,
+                        threshold_um = d_um, um_per_unit = upu,
+                        source = paste0("sf:", al$method), .before = 1)
+      })
+    })
+  })
+}
+
 # Spearman rho + p + n for two paired numeric vectors, as a one-row tibble.
 # Guards the small-n / zero-variance cases that abort cor.test().
 paired_spearman <- function(x, y) {
@@ -534,4 +650,32 @@ paired_spearman <- function(x, y) {
   }
   ct <- suppressWarnings(stats::cor.test(x, y, method = "spearman"))
   tibble::tibble(n = length(x), rho = unname(ct$estimate), p = ct$p.value)
+}
+
+# Pairwise cross-source agreement, for comparing several deconvolution methods (and
+# IHC) against each other rather than only against one reference. `df` is long with
+# columns source / patient_id / lineage / value (one value per source x lineage x
+# patient). For every ordered source pair it correlates each lineage across the
+# shared patients (Spearman, rank-based so differing score scales are fine) and
+# averages the per-lineage rho, returning a symmetric long table (a == b -> rho 1).
+# Different methods put scores on different scales; only rank agreement is meaningful.
+pairwise_agreement <- function(df, sources = sort(unique(df$source))) {
+  grid <- expand.grid(a = sources, b = sources, stringsAsFactors = FALSE)
+  purrr::pmap_dfr(grid, function(a, b) {
+    if (a == b)
+      return(tibble::tibble(a = a, b = b, mean_rho = 1, n_lineages = NA_integer_))
+    j <- dplyr::inner_join(
+      dplyr::filter(df, source == a),
+      dplyr::filter(df, source == b),
+      by = c("patient_id", "lineage"), suffix = c("_a", "_b"))
+    if (nrow(j) == 0)
+      return(tibble::tibble(a = a, b = b, mean_rho = NA_real_, n_lineages = 0L))
+    per <- j |>
+      dplyr::group_by(lineage) |>
+      dplyr::group_modify(~ paired_spearman(.x$value_a, .x$value_b)) |>
+      dplyr::ungroup()
+    tibble::tibble(a = a, b = b,
+                   mean_rho   = mean(per$rho, na.rm = TRUE),
+                   n_lineages = sum(is.finite(per$rho)))
+  })
 }
