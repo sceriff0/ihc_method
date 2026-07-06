@@ -73,15 +73,19 @@ if (length(intersect(neo_ids, ihc_ids)) == 0)
 
 ### sf membership diagnostics
 
-Why `sf::st_within` finds (or doesn't find) cells for each geojson patient. If
-`poly_x`/`poly_y` don't overlap `cell_x`/`cell_y`, that slide's annotation is in a
-different coordinate frame than its `centroid_x/y` (scale/units mismatch). If the
-ranges overlap but `n_inside == 0` with `polys_valid = FALSE`, it's an invalid
-polygon; `TRUE` with `n_inside == 0` suggests an axis flip.
+Decisive per-patient tests for *why* `sf::st_within` captures no cells. The
+`likely_cause` column is the verdict; the supporting numbers back it up:
+
+- **`n_in_bbox`** — cells inside the polygon's bounding rectangle (geometry-free).
+  High `n_in_bbox` but `n_within = 0` ⇒ the **geometry** is at fault, not the coords.
+- **`n_yflip` / `n_xflip`** — cells that fall inside if that axis is flipped ⇒ an
+  **inverted image axis** between the geojson and `centroid_x/y`.
+- **`poly_area` / `geom_type` / `polys_valid`** — a collapsed/degenerate polygon.
+- **`n_intersects`** — boundary-inclusive hit count.
 
 ```{r sf-diagnostics}
-knitr::kable(ihc_sf_diagnostics(ihc_data, annots),
-             caption = "Cell coords vs polygon bbox, validity, and cells captured per patient")
+knitr::kable(ihc_sf_diagnostics(ihc_data, annots), digits = 0,
+             caption = "sf point-in-polygon failure diagnosis per patient (see likely_cause)")
 ```
 
 ## Tumour content — IHC vs pathologist

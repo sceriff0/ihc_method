@@ -366,33 +366,64 @@ ihc_annotation_metrics <- function(ihc_data, annots,
   })
 }
 
-# Why does sf::st_within find no cells for a patient? Per patient with geojson,
-# compares the CELL centroid range to the POLYGON bounding box, reports polygon
-# validity, and the cells captured. Reading the table:
-#   poly bbox disjoint from cell range -> coordinate-scale/units mismatch (that
-#     slide's geojson is in a different frame than centroid_x/y).
-#   ranges overlap but n_inside == 0 -> invalid geometry (should be fixed by
-#     st_make_valid) or an axis flip.
+# Why does sf::st_within find no cells for a patient? Runs a battery of tests per
+# geojson patient and returns a `likely_cause` verdict that separates the failure
+# modes an eyeball can't:
+#   n_in_bbox  = cells whose centroid is in the polygon bounding RECTANGLE (cheap,
+#                geometry-free) — if this is high but n_within is 0, the polygon
+#                geometry is the problem, not the coordinates.
+#   n_within   = sf::st_within (strict interior)   n_intersects = boundary-inclusive
+#   n_yflip / n_xflip = cells inside after flipping that axis within the cell frame
+#                (detects an inverted image axis between the geojson and centroids)
+#   poly_area / geom_type / polys_valid = degenerate / collapsed geometry checks
 ihc_sf_diagnostics <- function(ihc_data, annots) {
   ihc_data <- dplyr::mutate(ihc_data, .pid = slide_key(patient_id))
   annots   <- dplyr::mutate(annots,   .pid = slide_key(patient_id))
   common   <- intersect(unique(ihc_data$.pid), unique(annots$.pid))
   rng <- function(v) sprintf("%.0f-%.0f", min(v, na.rm = TRUE), max(v, na.rm = TRUE))
+  n_in <- function(x, y, polys, crs) {
+    p <- sf::st_as_sf(data.frame(x = x, y = y), coords = c("x", "y"), crs = crs)
+    sum(lengths(sf::st_within(p, polys)) > 0)
+  }
 
   purrr::map_dfr(common, function(pid) {
-    cells_p <- dplyr::filter(ihc_data, .pid == pid)
-    polys_p <- dplyr::filter(annots,   .pid == pid)
-    pts <- sf::st_as_sf(cells_p, coords = c("centroid_x", "centroid_y"),
-                        remove = FALSE, crs = sf::st_crs(polys_p))
-    inside <- lengths(sf::st_within(pts, polys_p)) > 0
-    bb <- sf::st_bbox(polys_p)
+    cells_p <- dplyr::filter(ihc_data, .pid == pid,
+                             is.finite(centroid_x), is.finite(centroid_y))
+    polys_p <- dplyr::filter(annots, .pid == pid)
+    crs     <- sf::st_crs(polys_p)
+    x <- cells_p$centroid_x; y <- cells_p$centroid_y
+    poly_u <- sf::st_union(sf::st_geometry(polys_p))
+    bb <- sf::st_bbox(poly_u)
+    valid <- all(sf::st_is_valid(polys_p))
+    area  <- as.numeric(sf::st_area(poly_u))
+
+    in_bbox   <- x >= bb[["xmin"]] & x <= bb[["xmax"]] & y >= bb[["ymin"]] & y <= bb[["ymax"]]
+    pts       <- sf::st_as_sf(cells_p, coords = c("centroid_x", "centroid_y"), crs = crs)
+    n_within  <- sum(lengths(sf::st_within(pts, polys_p)) > 0)
+    n_inters  <- sum(lengths(sf::st_intersects(pts, polys_p)) > 0)
+    n_yflip   <- n_in(x, (min(y) + max(y)) - y, polys_p, crs)
+    n_xflip   <- n_in((min(x) + max(x)) - x, y, polys_p, crs)
+
+    cause <- dplyr::case_when(
+      n_within > 0                 ~ "ok",
+      !valid                       ~ "geometry: invalid polygon (st_make_valid failed)",
+      isTRUE(area == 0)            ~ "geometry: degenerate polygon (zero area)",
+      sum(in_bbox) == 0           ~ "coords: polygon outside cell range (scale/units mismatch)",
+      n_yflip > 0                  ~ "axis: y is flipped between geojson and centroids",
+      n_xflip > 0                  ~ "axis: x is flipped between geojson and centroids",
+      n_inters > 0                 ~ "boundary: cells touch the edge only",
+      TRUE                         ~ "unknown: bbox overlaps, geometry valid, still no cells in"
+    )
     tibble::tibble(
       patient_id = pid, n_cells = nrow(cells_p), n_polys = nrow(polys_p),
-      cell_x = rng(cells_p$centroid_x), cell_y = rng(cells_p$centroid_y),
+      geom_type = as.character(sf::st_geometry_type(poly_u)),
+      poly_area = round(area), polys_valid = valid,
+      cell_x = rng(x), cell_y = rng(y),
       poly_x = sprintf("%.0f-%.0f", bb[["xmin"]], bb[["xmax"]]),
       poly_y = sprintf("%.0f-%.0f", bb[["ymin"]], bb[["ymax"]]),
-      polys_valid = all(sf::st_is_valid(polys_p)),
-      n_inside = sum(inside), pct_inside = round(100 * mean(inside), 1)
+      n_in_bbox = sum(in_bbox), n_within = n_within, n_intersects = n_inters,
+      n_yflip = n_yflip, n_xflip = n_xflip,
+      likely_cause = cause
     )
   })
 }
