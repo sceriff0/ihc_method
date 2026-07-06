@@ -403,16 +403,24 @@ ihc_sf_diagnostics <- function(ihc_data, annots) {
     n_inters  <- sum(lengths(sf::st_intersects(pts, polys_p)) > 0)
     n_yflip   <- n_in(x, (min(y) + max(y)) - y, polys_p, crs)
     n_xflip   <- n_in((min(x) + max(x)) - x, y, polys_p, crs)
+    n_swap    <- n_in(y, x, polys_p, crs)                       # x/y axes swapped
+    # scaled: match cell range onto the polygon range (detects a downsample factor)
+    sx <- if (diff(range(x)) > 0) (bb[["xmax"]] - bb[["xmin"]]) / diff(range(x)) else 1
+    sy <- if (diff(range(y)) > 0) (bb[["ymax"]] - bb[["ymin"]]) / diff(range(y)) else 1
+    n_scaled <- n_in(bb[["xmin"]] + (x - min(x)) * sx,
+                     bb[["ymin"]] + (y - min(y)) * sy, polys_p, crs)
 
     cause <- dplyr::case_when(
-      n_within > 0                 ~ "ok",
-      !valid                       ~ "geometry: invalid polygon (st_make_valid failed)",
-      isTRUE(area == 0)            ~ "geometry: degenerate polygon (zero area)",
-      sum(in_bbox) == 0           ~ "coords: polygon outside cell range (scale/units mismatch)",
-      n_yflip > 0                  ~ "axis: y is flipped between geojson and centroids",
-      n_xflip > 0                  ~ "axis: x is flipped between geojson and centroids",
-      n_inters > 0                 ~ "boundary: cells touch the edge only",
-      TRUE                         ~ "unknown: bbox overlaps, geometry valid, still no cells in"
+      n_within > 0        ~ "ok",
+      !valid              ~ "geometry: invalid polygon (st_make_valid failed)",
+      isTRUE(area == 0)   ~ "geometry: degenerate polygon (zero area)",
+      n_swap > 0          ~ "axis: x/y swapped (FlowPath row/col vs geojson x/y) — swap centroid_x/y",
+      n_yflip > 0         ~ "axis: y flipped between geojson and centroids",
+      n_xflip > 0         ~ "axis: x flipped between geojson and centroids",
+      sum(in_bbox) == 0 && n_scaled > 0 ~ "coords: scale/downsample factor differs (rescale fixes it)",
+      sum(in_bbox) == 0   ~ "coords: polygon far outside cell range (different frame/units)",
+      n_inters > 0        ~ "boundary: cells touch the edge only",
+      TRUE                ~ "unknown: bbox overlaps, geometry valid, still no cells in"
     )
     tibble::tibble(
       patient_id = pid, n_cells = nrow(cells_p), n_polys = nrow(polys_p),
@@ -422,7 +430,7 @@ ihc_sf_diagnostics <- function(ihc_data, annots) {
       poly_x = sprintf("%.0f-%.0f", bb[["xmin"]], bb[["xmax"]]),
       poly_y = sprintf("%.0f-%.0f", bb[["ymin"]], bb[["ymax"]]),
       n_in_bbox = sum(in_bbox), n_within = n_within, n_intersects = n_inters,
-      n_yflip = n_yflip, n_xflip = n_xflip,
+      n_swap = n_swap, n_yflip = n_yflip, n_xflip = n_xflip, n_scaled = n_scaled,
       likely_cause = cause
     )
   })
