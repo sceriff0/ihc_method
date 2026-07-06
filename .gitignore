@@ -10,6 +10,7 @@ analysis/*html
 analysis/*_cache
 analysis/site_libs
 data/*
+.planning/
 .citadel/
 .claude/
 AGENTS.md
