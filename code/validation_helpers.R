@@ -314,15 +314,34 @@ region_composition <- function(region_metrics,
 # TRUE where a FlowPath `Out_of_annotation` value marks a cell OUTSIDE the region.
 .is_outside <- function(x) tolower(trimws(as.character(x))) %in% c("true", "1", "yes", "t")
 
+# Align FlowPath centroids to the geojson coordinate frame. The two can differ by a
+# pixel<->micron scale (e.g. 0.325 um/px): geojson in pixels, centroids in microns
+# (or vice-versa). Tries native, centroids*um_per_px, centroids/um_per_px, and keeps
+# whichever lands the most cells inside the polygons. Returns the chosen coords, the
+# st_within result, and a method label. um_per_px = NULL -> native only.
+.align_xy <- function(x, y, polys, crs, um_per_px = NULL) {
+  cands <- list(list(x = x, y = y, m = "native"))
+  if (!is.null(um_per_px)) cands <- c(cands, list(
+    list(x = x * um_per_px, y = y * um_per_px, m = sprintf("px2um(x%.4g)", um_per_px)),
+    list(x = x / um_per_px, y = y / um_per_px, m = sprintf("um2px(/%.4g)", um_per_px))))
+  best <- cands[[1]]; best_n <- -1L; best_w <- NULL
+  for (cc in cands) {
+    p <- sf::st_as_sf(data.frame(x = cc$x, y = cc$y), coords = c("x", "y"), crs = crs)
+    w <- sf::st_within(p, polys); n <- sum(lengths(w) > 0)
+    if (n > best_n) { best_n <- n; best <- cc; best_w <- w }
+  }
+  list(x = best$x, y = best$y, within = best_w, method = best$m)
+}
+
 # Region metrics per patient over ALL IHC patients (slide space). Preference:
 #   patient HAS geojson  -> sf::st_within on the raw polygons (trusted)
 #   patient has NO geojson -> fall back to the CSV `Out_of_annotation` flag
 # `scope`: "per_annotation" (one row per polygon) or "union" (one row per patient
-# over the dissolved polygons). CSV-fallback patients always yield a single row
-# tagged annotation = "csv". A `source` column records sf vs csv provenance.
+# over the dissolved polygons). `um_per_px` (e.g. 0.325) enables pixel<->micron
+# alignment per patient. A `source` column records sf(<method>) vs csv provenance.
 ihc_annotation_metrics <- function(ihc_data, annots,
                                     scope = c("per_annotation", "union"),
-                                    use_csv_fallback = TRUE) {
+                                    use_csv_fallback = TRUE, um_per_px = NULL) {
   scope    <- match.arg(scope)
   ihc_data <- dplyr::mutate(ihc_data, .pid = slide_key(patient_id))
   annots   <- dplyr::mutate(annots,   .pid = slide_key(patient_id))
@@ -333,15 +352,15 @@ ihc_annotation_metrics <- function(ihc_data, annots,
 
     if (pid %in% ann_ids) {
       polys_p <- dplyr::filter(annots, .pid == pid)
-      pts <- sf::st_as_sf(cells_p, coords = c("centroid_x", "centroid_y"),
-                          remove = FALSE, crs = sf::st_crs(polys_p))
-      within <- sf::st_within(pts, polys_p)  # per-cell list of polygon indices
+      al     <- .align_xy(cells_p$centroid_x, cells_p$centroid_y,
+                          polys_p, sf::st_crs(polys_p), um_per_px)
+      within <- al$within  # per-cell list of polygon indices (best-aligned)
 
       if (scope == "union") {
         inside <- lengths(within) > 0
-        src    <- "sf"
-        # sf found no cells (invalid/misaligned polygon) -> fall back to the CSV
-        # Out_of_annotation flag so this patient is still counted in the union.
+        src    <- paste0("sf:", al$method)
+        # sf found no cells (invalid polygon / unrecoverable frame) -> fall back to
+        # the CSV Out_of_annotation flag so this patient is still counted.
         if (!any(inside) && use_csv_fallback && "Out_of_annotation" %in% names(cells_p)) {
           inside <- !.is_outside(cells_p$Out_of_annotation)
           src    <- "csv(sf-empty)"
@@ -353,7 +372,7 @@ ihc_annotation_metrics <- function(ihc_data, annots,
           inside_i <- vapply(within, function(idx) i %in% idx, logical(1))
           region_ratios(cells_p[inside_i, , drop = FALSE]) |>
             dplyr::mutate(patient_id = pid, annotation = polys_p$annotation[i],
-                          source = "sf", .before = 1)
+                          source = paste0("sf:", al$method), .before = 1)
         })
       }
     } else if (use_csv_fallback && "Out_of_annotation" %in% names(cells_p)) {
@@ -376,7 +395,7 @@ ihc_annotation_metrics <- function(ihc_data, annots,
 #   n_yflip / n_xflip = cells inside after flipping that axis within the cell frame
 #                (detects an inverted image axis between the geojson and centroids)
 #   poly_area / geom_type / polys_valid = degenerate / collapsed geometry checks
-ihc_sf_diagnostics <- function(ihc_data, annots) {
+ihc_sf_diagnostics <- function(ihc_data, annots, um_per_px = 0.325) {
   ihc_data <- dplyr::mutate(ihc_data, .pid = slide_key(patient_id))
   annots   <- dplyr::mutate(annots,   .pid = slide_key(patient_id))
   common   <- intersect(unique(ihc_data$.pid), unique(annots$.pid))
@@ -409,18 +428,23 @@ ihc_sf_diagnostics <- function(ihc_data, annots) {
     sy <- if (diff(range(y)) > 0) (bb[["ymax"]] - bb[["ymin"]]) / diff(range(y)) else 1
     n_scaled <- n_in(bb[["xmin"]] + (x - min(x)) * sx,
                      bb[["ymin"]] + (y - min(y)) * sy, polys_p, crs)
+    # pixel<->micron conversion tests (um_per_px, default 0.325)
+    n_px2um <- if (!is.null(um_per_px)) n_in(x * um_per_px, y * um_per_px, polys_p, crs) else NA_integer_
+    n_um2px <- if (!is.null(um_per_px)) n_in(x / um_per_px, y / um_per_px, polys_p, crs) else NA_integer_
 
     cause <- dplyr::case_when(
-      n_within > 0        ~ "ok",
-      !valid              ~ "geometry: invalid polygon (st_make_valid failed)",
-      isTRUE(area == 0)   ~ "geometry: degenerate polygon (zero area)",
-      n_swap > 0          ~ "axis: x/y swapped (FlowPath row/col vs geojson x/y) — swap centroid_x/y",
-      n_yflip > 0         ~ "axis: y flipped between geojson and centroids",
-      n_xflip > 0         ~ "axis: x flipped between geojson and centroids",
+      n_within > 0            ~ "ok",
+      !valid                  ~ "geometry: invalid polygon (st_make_valid failed)",
+      isTRUE(area == 0)       ~ "geometry: degenerate polygon (zero area)",
+      isTRUE(n_px2um > 0)     ~ sprintf("units: centroids are PIXELS, geojson MICRONS — x %.4g", um_per_px),
+      isTRUE(n_um2px > 0)     ~ sprintf("units: centroids are MICRONS, geojson PIXELS — / %.4g", um_per_px),
+      n_swap > 0              ~ "axis: x/y swapped (FlowPath row/col vs geojson x/y) — swap centroid_x/y",
+      n_yflip > 0             ~ "axis: y flipped between geojson and centroids",
+      n_xflip > 0             ~ "axis: x flipped between geojson and centroids",
       sum(in_bbox) == 0 && n_scaled > 0 ~ "coords: scale/downsample factor differs (rescale fixes it)",
-      sum(in_bbox) == 0   ~ "coords: polygon far outside cell range (different frame/units)",
-      n_inters > 0        ~ "boundary: cells touch the edge only",
-      TRUE                ~ "unknown: bbox overlaps, geometry valid, still no cells in"
+      sum(in_bbox) == 0       ~ "coords: polygon far outside cell range (different frame/units)",
+      n_inters > 0            ~ "boundary: cells touch the edge only",
+      TRUE                    ~ "unknown: bbox overlaps, geometry valid, still no cells in"
     )
     tibble::tibble(
       patient_id = pid, n_cells = nrow(cells_p), n_polys = nrow(polys_p),
@@ -430,6 +454,7 @@ ihc_sf_diagnostics <- function(ihc_data, annots) {
       poly_x = sprintf("%.0f-%.0f", bb[["xmin"]], bb[["xmax"]]),
       poly_y = sprintf("%.0f-%.0f", bb[["ymin"]], bb[["ymax"]]),
       n_in_bbox = sum(in_bbox), n_within = n_within, n_intersects = n_inters,
+      n_px2um = n_px2um, n_um2px = n_um2px,
       n_swap = n_swap, n_yflip = n_yflip, n_xflip = n_xflip, n_scaled = n_scaled,
       likely_cause = cause
     )

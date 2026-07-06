@@ -94,8 +94,13 @@ The pathologist scores tumour content per annotation (`ANNOTATION_1..3`). Compar
 against the IHC tumour fraction computed inside the matching polygon.
 
 ```{r tumor-content}
-ihc_tumor_per_ann <- ihc_annotation_metrics(ihc_data, annots, scope = "per_annotation")
-ihc_tumor_union   <- ihc_annotation_metrics(ihc_data, annots, scope = "union")
+# um_per_px = 0.325: pixel<->micron conversion — sf tries native / x0.325 / /0.325
+# per patient and keeps whichever lands cells inside (see the source column).
+UM_PER_PX <- 0.325
+ihc_tumor_per_ann <- ihc_annotation_metrics(ihc_data, annots, scope = "per_annotation",
+                                            um_per_px = UM_PER_PX)
+ihc_tumor_union   <- ihc_annotation_metrics(ihc_data, annots, scope = "union",
+                                            um_per_px = UM_PER_PX)
 
 path_long <- neoplastic_data |>
   mutate(patient_id = slide_key(SAMPLE)) |>
