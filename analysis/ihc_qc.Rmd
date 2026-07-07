@@ -25,20 +25,29 @@ theme_set(theme_paper)   # house style (mirage benchmarks)
 CAP <- "ihc_method internal QC · FlowPath single-cell IHC"
 ```
 
-## Purpose
+## Starting data and notation
 
-**Internal QC of the IHC readout** — validation that needs no external reference,
-only `ihc_data`. Traces a fault backwards through the pipeline:
+Every value below is derived from a single input, with **no external reference**:
 
-1. **Phenotype ↔ marker concordance** — do cells labelled a type express the
-   marker that defines it? (validates the phenotyping/gating)
-2. **Per-channel usability** — is each marker's `_sign` a clean threshold on a
-   bimodal signal? (validates the individual stains)
-3. **Morphology by phenotype** — do cell shapes match their assigned type?
-   (validates that segmentation captures real cells)
+- `ihc_data` — FlowPath single cells, deduplicated to **one copy per patient**
+  (whole slide). Each cell carries `phenotype_clean` (the parenthetical label in
+  `phenotype`) and, for each marker $m$, the triple
+  $(m\texttt{\_raw},\,m\texttt{\_zscore},\,m\texttt{\_sign})$.
 
-Lineage **leakage & exclusivity** (segmentation / optical spillover) lives in its
-own report — see [exclusivity.html](exclusivity.html).
+Notation used throughout. Let $C_p$ be all cells of patient $p$ in `ihc_data`, and
+$C=\bigcup_p C_p$ the whole set of imaged cells. `ihc_marker_long(ihc_data)`
+reshapes $C$ to **one row per $(c,m)$ pair** over the markers $m\in M$
+(`ihc_markers` = `marker_gene_map$marker`, excluding `wrongL1CAM`/DAPI), carrying
+per pair the raw value $r_{c,m}$, the z-score $z_{c,m}$, the sign string
+$s_{c,m}$, and the boolean
+
+$$
+\text{pos}_{c,m}=\texttt{is\_pos}(s_{c,m})=\mathbf{1}\!\left[\,\operatorname{lower}(\operatorname{trim}(s_{c,m}))\in\{+,\text{pos},\text{positive},\text{yes},\text{true},1\}\,\right].
+$$
+
+`phenotype_clean` is the cell type $t(c)$. All patient ids are mapped to the
+shared slide space by `slide_key()`. The reports restricts to
+**typed** cells: $t(c)\notin\{\texttt{NA},\text{"Unknown"}\}$.
 
 ```{r marker-long}
 mk_long <- ihc_marker_long(ihc_data) |>
@@ -50,8 +59,16 @@ cat("cells:", dplyr::n_distinct(mk_long$cell_id),
 
 ## 1. Phenotype ↔ marker concordance
 
-Mean marker z-score per phenotype. A trustworthy readout shows a block/diagonal
-structure — each cell type lights up its defining marker(s) and little else.
+For each phenotype $t$ and marker $m$, over the typed pairs
+$\{c : t(c)=t\}$:
+
+$$
+\text{mean\_z}_{t,m}=\operatorname{mean}_{c:\,t(c)=t} z_{c,m},\qquad
+\text{pct\_pos}_{t,m}=\operatorname{mean}_{c:\,t(c)=t}\text{pos}_{c,m},
+$$
+
+both computed with `na.rm = TRUE`. The heatmap fills each $(m,t)$ tile with
+$\text{mean\_z}_{t,m}$ (diverging scale centred at $0$).
 
 ```{r concordance-matrix}
 conc <- mk_long |>
@@ -69,6 +86,25 @@ ggplot(conc, aes(marker, phenotype_clean, fill = mean_z)) +
   theme(axis.text.x = element_text(angle = 45, hjust = 1),
         panel.grid = element_blank())
 ```
+
+**Defining-marker check.** `expected` is a fixed table $D$ giving the defining
+marker $d(t)$ for each phenotype. Within each phenotype the markers are ranked by
+descending mean z-score,
+
+$$
+\text{rank\_z}_{t,m}=\operatorname{rank}\!\big(-\text{mean\_z}_{t,\cdot}\big)_m
+\quad(\text{rank }1=\text{largest mean\_z}),
+$$
+
+and the row for $m=d(t)$ is kept (`inner_join` on $D$). The reported
+`rank_of_defining` is $\text{rank\_z}_{t,d(t)}$ and
+
+$$
+\text{pass}_t=\mathbf{1}\!\left[\text{rank\_z}_{t,d(t)}\le 2\right]
+$$
+
+(defining marker is among the phenotype's top-2 mean-z signals). `mean_z` is
+rounded to 2 dp; rows are sorted by descending `rank_of_defining`.
 
 ```{r concordance-expected}
 # Encode the expected defining marker(s) per phenotype and check it is the top
@@ -101,11 +137,39 @@ knitr::kable(check, caption = "Is each phenotype's defining marker among its top
 
 ## 2. Per-channel usability
 
-A usable marker has a **bimodal** z-score (a negative and a positive population)
-and a `_sign` call that cleanly separates them. Bimodality: Hartigan's dip test
-(if `diptest` is installed) plus Sarle's bimodality coefficient (BC > 0.555
-suggests bimodality). Separation: are the `_sign+` z-scores disjoint from
-`_sign−`, and what cutoff sits between them.
+Per marker $m$, over all cells with finite $z_{c,m}$ (typed and untyped —
+`ihc_marker_long(ihc_data)` is re-derived here without the phenotype filter).
+
+**Bimodality.** Sarle's bimodality coefficient on the z-scores $\{z_{c,m}\}$
+($n$ finite values, sample mean $\bar z$, sample sd $\sigma$):
+
+$$
+g=\frac{1}{n}\sum\Big(\frac{z-\bar z}{\sigma}\Big)^3,\quad
+k=\frac{1}{n}\sum\Big(\frac{z-\bar z}{\sigma}\Big)^4-3,\quad
+\text{BC}=\frac{g^2+1}{\,k+\dfrac{3(n-1)^2}{(n-2)(n-3)}\,},
+$$
+
+returning `NA` if $n<4$ or $\sigma=0$. `dip_p` is Hartigan's dip-test p-value
+(`diptest::dip.test`) when the package is installed and $n\ge 4$, else `NA`.
+
+**Sign-vs-zscore separability.** With the positive/negative split from
+$\text{pos}_{c,m}$:
+
+$$
+\text{neg\_max}_m=\max_{c:\,\lnot\text{pos}} z_{c,m},\qquad
+\text{pos\_min}_m=\min_{c:\,\text{pos}} z_{c,m},
+$$
+
+$$
+\text{separable}_m=\mathbf{1}\!\left[\text{pos\_min}_m>\text{neg\_max}_m\right],\quad
+\text{cutoff}_m=\begin{cases}\tfrac{\text{neg\_max}_m+\text{pos\_min}_m}{2}&\text{separable}\\[2pt]\texttt{NA}&\text{else,}\end{cases}
+$$
+
+$$
+\text{likely\_bimodal}_m=\mathbf{1}\!\left[\text{BC}_m>0.555\ \lor\ (\,\text{dip\_p}_m<0.05\,)\right].
+$$
+
+Rows are sorted by descending BC.
 
 ```{r channel-qc}
 bimodality_coef <- function(x) {                       # Sarle's BC
@@ -143,6 +207,9 @@ knitr::kable(channel_qc, digits = 3,
              caption = "Per-channel bimodality and sign-vs-zscore separability")
 ```
 
+Density of $z_{c,m}$ per marker (finite $z$ and non-`NA` sign only), split by the
+call $\text{pos}_{c,m}$ (`sign +` / `sign -`); facets are free-scaled.
+
 ```{r channel-qc-plot, fig.height=8}
 ihc_marker_long(ihc_data) |>
   filter(!is.na(zscore), !is.na(sign)) |>
@@ -158,9 +225,17 @@ ihc_marker_long(ihc_data) |>
 
 ## 3. Morphology by phenotype
 
-Segmentation should produce cells whose shape matches their type: tumour cells
-larger, lymphocytes small and round (high solidity), stroma elongated (high
-eccentricity). Includes circularity = 4·π·area / perimeter².
+Morphology features are the intersection of
+$\{\texttt{area},\texttt{perimeter},\texttt{eccentricity},\texttt{solidity}\}$
+with `names(ihc_data)`, plus circularity when both `area` and `perimeter` exist:
+
+$$
+\text{circularity}(c)=\frac{4\pi\,\texttt{area}(c)}{\texttt{perimeter}(c)^2}.
+$$
+
+Over typed cells, each feature is pivoted long and filtered to finite values; the
+plot is a per-phenotype boxplot (phenotypes ordered by median feature value,
+outliers hidden, facets free-scaled).
 
 ```{r morphology}
 morph_feats <- intersect(c("area", "perimeter", "eccentricity", "solidity"),
@@ -187,12 +262,12 @@ ggplot(morph, aes(reorder(phenotype_clean, value, FUN = median), value,
 
 ## Notes
 
-- All three checks use only `ihc_data` — no external reference, so they hold even
-  for slides with no pathologist annotation or matched RNA.
-- Concordance (#1) reads the gating; channel QC (#2) reads the individual stains;
-  morphology (#3) reads the segmentation. A failure in #1 is often explained by a
-  culprit surfaced in #2 (a bad channel) or by spillover (see
-  [exclusivity.html](exclusivity.html)).
-- `separable = FALSE` in the channel table means `_sign` is not a pure threshold on
-  `_zscore` (likely thresholded on `_raw` instead) — inspect that channel's density
-  panel before trusting its positivity calls.
+- All three checks use only `ihc_data`; no external reference is joined.
+- `mean` reductions carry `na.rm = TRUE`; `neg_max`/`pos_min` return non-finite
+  (`±Inf`) when a marker has no negative (resp. positive) cell, which drives
+  `separable = FALSE` via the `is.finite` guards.
+- `separable = FALSE` means `_sign` is not a pure threshold on `_zscore` (the
+  `_sign+` and `_sign−` z-score ranges overlap — likely thresholded on `_raw`);
+  its `cutoff` is then `NA`.
+- `likely_bimodal` uses an inclusive-or of BC $>0.555$ and dip-p $<0.05$; if
+  `diptest` is absent the dip-p term is `NA` and only BC decides.

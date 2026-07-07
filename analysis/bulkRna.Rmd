@@ -21,19 +21,51 @@ invisible(capture.output(suppressMessages(source(here("code", "test.R")))))
 source(here("code", "validation_helpers.R"))
 ```
 
-## Purpose
+## Starting data and notation
 
-Cross-modality validation of the IHC readout against **bulk-RNA marker genes**: if
-IHC protein positivity is real, the fraction of cells positive for a marker should
-track the bulk-RNA expression of that marker's gene across patients. This is the
-most direct check — one protein against its own transcript — and needs no
-deconvolution model.
+Every value below is derived from three inputs:
 
-For each IHC marker we take its canonical gene(s) (`marker_gene_map`), average
-multi-gene markers, and correlate bulk expression vs the per-patient fraction of
-`<marker>_sign == "+"` cells.
+- `ihc_data` — FlowPath single cells, deduplicated to **one copy per patient**
+  (whole slide, no annotation boundary). Carries per-marker `<marker>_sign` and
+  `<marker>_zscore` columns and `patient_id`.
+- `counts_data` — DESeq2-normalised **bulk RNA**, one row per RNA sample, one
+  column per gene, plus the CRF-space sample id `Sample`.
+- `clinical_data` — the clinical CRF, used only for the id crosswalk
+  `ID PATIENT` (slide space) $\leftrightarrow$ `ID CRF PRESERVE` (CRF space).
+
+Notation used throughout. $C_p$ = all cells of patient $p$ in `ihc_data`. A cell
+$c$ is **marker-positive** for marker $m$ iff `is_pos(`$m$`_sign`$(c))$, i.e.
+$m$`_sign`$(c)\in\{+,\text{pos},\text{positive},\text{yes},\text{true},1\}$.
+Ids live in two spaces bridged through the clinical CRF:
+`crf_to_slide_map(clinical_data)` is the named vector
+$\texttt{crf2slide}:\ \texttt{norm\_id}(\texttt{ID CRF PRESERVE})\mapsto
+\texttt{slide\_key}(\texttt{ID PATIENT})$, and `slide_key()` is the canonical
+slide key (strip non-digits, apply the verified typo fix `15879`$\to$`15897`).
+`marker_gene_map` sends each IHC marker $m$ to a comma-separated gene list
+$G_m$ (e.g. `CD3`$\to$`{CD3D,CD3E,CD3G}`, `PANCK`$\to$
+`{EPCAM,KRT5,KRT8,KRT14,KRT18,KRT19}`); multi-gene markers are averaged. Paired
+associations are Spearman $\rho$ via `paired_spearman`.
 
 ## Per-patient bulk expression of each marker's gene(s)
+
+RNA samples are keyed in CRF space; `crf2slide` bridges them to slide space.
+`counts_data` is melted to long triples $(\texttt{Sample},\ \texttt{crf\_id}=
+\texttt{norm\_id}(\texttt{Sample}),\ \texttt{gene},\ \texttt{expr})$, one row per
+(sample, gene). `gene_rows` expands `marker_gene_map` to one row per $(m,g)$ for
+$g\in G_m$ (comma-split, trimmed); `marker_genes` keeps only $(m,g)$ whose gene
+appears in the RNA matrix, i.e. $g\in G_m^{\,\text{RNA}}=G_m\cap
+\texttt{genes}(\texttt{counts\_data})$.
+
+Per marker $m$ and CRF sample $s$, expression is the mean over that marker's
+available genes:
+
+$$
+\texttt{rna\_expr}_{m,s}=\frac{1}{|G_m^{\,\text{RNA}}|}\sum_{g\in G_m^{\,\text{RNA}}}\texttt{expr}(s,g),
+$$
+
+then the CRF id is mapped to slide space via
+$\texttt{patient\_id}=\texttt{crf2slide}[\texttt{crf\_id}(s)]$ and rows with no
+crosswalk match (`NA`) are dropped.
 
 ```{r marker-expression}
 # RNA samples are CRF-id space; bridge to IHC slide-id space via clinical
@@ -69,6 +101,17 @@ marker_expr <- expr_long |>
 
 ## Per-patient IHC positive-cell fraction
 
+`ihc_marker_fraction(ihc_data)` groups cells by `slide_key(patient_id)` and, for
+each marker $m$, returns the whole-slide positive fraction (mean of `is_pos`
+over non-`NA` sign values):
+
+$$
+m\texttt{\_posfrac}_p=\frac{1}{|C_p|}\sum_{c\in C_p}\mathbf{1}\!\left[\texttt{is\_pos}(m\texttt{\_sign}(c))\right],
+$$
+
+taken here for all `_posfrac` columns and reshaped long to
+$(\texttt{patient\_id},\ \texttt{marker}=m,\ \texttt{ihc\_posfrac})$.
+
 ```{r ihc-fraction}
 ihc_frac <- ihc_marker_fraction(ihc_data) |>
   select(patient_id, ends_with("_posfrac")) |>
@@ -80,6 +123,15 @@ cat("IHC patients:", dplyr::n_distinct(ihc_frac$patient_id),
 ```
 
 ## Marker-by-marker concordance
+
+Inner-join `marker_expr` and `ihc_frac` on $(\texttt{marker},\
+\texttt{patient\_id})$, keeping finite pairs. Per marker $m$, over its shared
+patients $P_m$, the statistic is Spearman's
+$\rho=1-\dfrac{6\sum d_i^2}{n(n^2-1)}$ on the ranks of the paired vectors
+$x=(\texttt{ihc\_posfrac}_p)_{p\in P_m}$ and $y=(\texttt{rna\_expr}_p)_{p\in
+P_m}$ (`paired_spearman`, via `cor.test(method="spearman")`), with its p-value
+and $n=|P_m|$; `NA` when $n<3$ or either vector is constant. Rows are sorted by
+descending $\rho$.
 
 ```{r concordance}
 paired <- marker_expr |>
@@ -99,6 +151,9 @@ knitr::kable(summary_tbl, digits = 3,
              caption = "Spearman: IHC positive-cell fraction vs bulk-RNA expression")
 ```
 
+Scatter per marker: $x=\texttt{ihc\_posfrac}_p$ against
+$y=\log(1+\texttt{rna\_expr}_p)$ (`log1p`, keeping zeros), with an OLS fit line.
+
 ```{r concordance-plot, fig.height=8}
 if (nrow(paired) > 0) {
   # log-scale expression (counts span orders of magnitude); +1 to keep zeros.
@@ -112,8 +167,16 @@ if (nrow(paired) > 0) {
 }
 ```
 
-Sensitivity: the mean marker z-score (continuous staining intensity) instead of the
-positive-cell fraction, in case a hard `_sign` threshold loses signal.
+Sensitivity: replace the hard-threshold positive fraction with the per-patient
+mean staining intensity (mean z-score over non-`NA` cells),
+
+$$
+m\texttt{\_z}_p=\frac{1}{|C_p|}\sum_{c\in C_p}m\texttt{\_zscore}(c)
+\quad(\texttt{ihc\_marker\_fraction}),
+$$
+
+and correlate $m\texttt{\_z}_p$ against $\texttt{rna\_expr}_p$ per marker with the
+same Spearman statistic.
 
 ```{r zscore-sensitivity}
 ihc_z <- ihc_marker_fraction(ihc_data) |>
@@ -138,11 +201,16 @@ if (nrow(paired_z) > 0) {
 
 ## Notes
 
-- Expect strong positive correlation for lineage-specific markers (PTPRC/CD45,
-  CD3, CD8A, CD163, NCAM1/CD56) where protein and transcript co-vary; weaker or
-  absent for markers regulated post-transcriptionally or with poor antibody
-  specificity — a low `rho` flags an IHC channel worth auditing.
-- `PANCK` maps to `EPCAM` + keratin genes (averaged); `SMA`→`ACTA2`,
-  `CD56`→`NCAM1`, `PDL1`→`CD274`, `PD1`→`PDCD1`, `FSP1`→`S100A4`. `wrongL1CAM` is
-  excluded by construction.
-- Correlations are cross-patient and small-n; every row carries its `n`.
+- Both IHC reductions use `na.rm = TRUE`: $m\texttt{\_posfrac}_p$ and
+  $m\texttt{\_z}_p$ average over the non-`NA` sign / z-score cells of $C_p$, so
+  the effective denominator is that count, not necessarily $|C_p|$.
+- `rna_expr` averages only genes actually present in `counts_data`
+  ($G_m^{\,\text{RNA}}$); genes in $G_m$ absent from the matrix are reported by
+  the `missing` message and excluded from the mean. A marker with
+  $G_m^{\,\text{RNA}}=\varnothing$ contributes no RNA row.
+- The gene join is `relationship = "many-to-many"`, but each $(s,g)$ has a single
+  `expr`, so the per-$(m,s)$ mean is over distinct genes.
+- `PANCK` averages `EPCAM` + keratins; `SMA`$\to$`ACTA2`, `CD56`$\to$`NCAM1`,
+  `PDL1`$\to$`CD274`, `PD1`$\to$`PDCD1`, `FSP1`$\to$`S100A4`. `wrongL1CAM` is
+  excluded by construction (not in `marker_gene_map`).
+- Correlations are cross-patient and small-n; every row carries its $n$.

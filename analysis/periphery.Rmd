@@ -8,8 +8,8 @@ editor_options:
 ---
 
 ```{r setup, include=FALSE}
-# renv: same deps as clinical_data.Rmd — sf + jsonlite for the geojson buffers,
-#   plus tidyverse + here.  renv::install(c("sf", "jsonlite")); renv::snapshot()
+# renv: sf + jsonlite for the geojson buffers, plus tidyverse + here.
+#   renv::install(c("sf", "jsonlite")); renv::snapshot()
 suppressPackageStartupMessages({
   library(tidyverse)
   library(here)
@@ -19,71 +19,54 @@ suppressPackageStartupMessages({
 knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE,
                       fig.width = 9, fig.height = 6)
 
-# Loaders (dds, clinical_data, neoplastic_data, counts_data, ihc_data) and the
-# shared validation helpers. test.R prints colnames() on load; silence it.
+# Loaders (dds, clinical_data, neoplastic_data, counts_data, ihc_data, ihc_annot)
+# and the shared validation helpers. test.R prints colnames() on load; silence it.
 invisible(capture.output(suppressMessages(source(here("code", "test.R")))))
 source(here("code", "validation_helpers.R"))
 ```
 
-## Purpose
+## Starting data and geometry
 
-`clinical_data.Rmd` validates immunity *inside* the tumour annotation. This report
-asks the complementary spatial question: **what does immunity look like at the
-tumour border**, and does the border readout track the clinical hot/cold call?
+Inputs: `ihc_data` (whole-slide FlowPath cells, one copy per patient, with
+`centroid_x`/`centroid_y` in **microns**), the pathologist annotation **geojson**
+polygons (in **pixels**), and the clinical `HOT score` / `Immuno-phenotype`.
 
-The tumour–host interface carries information the whole-region average hides. The
-canonical example is the immune-phenotype axis (Chen & Mellman 2017; Hegde 2016),
-which is defined purely by *where* CD8 T cells sit relative to the border:
+Unlike the inside-the-annotation checks, membership here needs real geometry (a
+distance band cannot come from the binary `Out_of_annotation` flag), so this report
+keeps `sf`. Cells are mapped into the polygon pixel frame by a **fixed** conversion:
 
-- **inflamed / hot** — T cells throughout the tumour **core**;
-- **immune-excluded / cold** — T cells trapped at the **invasive margin**, not in the core;
-- **immune-desert / cold** — few T cells anywhere.
+$$
+x_\text{px}=\frac{\texttt{centroid\_x}}{0.325},\qquad
+y_\text{px}=\frac{\texttt{centroid\_y}}{0.325}
+\qquad(0.325\ \mu\text{m/px}).
+$$
 
-A single "fraction inside the annotation" cannot separate *inflamed* from
-*excluded* (both can be immune-rich on average) — but a **margin-vs-core**
-contrast can. That is the readout this report builds.
+One pixel is therefore `um_per_px` $=0.325\ \mu$m, giving the two conversions used
+below: a micron threshold $d$ becomes $d/0.325$ pixel units, and a pixel area
+$A_\text{px}$ becomes $A_\text{px}\cdot 0.325^2/10^6\ \text{mm}^2$.
 
-We compute, per patient, immune metrics in an **invasive-margin band** (a ring of
-half-width `d` centred on the annotation boundary) and in the **eroded deep core**
-(interior beyond `d`), for several literature-grounded `d`, over both **single
-annotations** and their **union**, then compare against the clinical `HOT score`
-and `Immuno-phenotype`.
+## Margin and core regions
 
-## Periphery thresholds (literature-grounded)
+For a core polygon $P$ (the dissolved union of a patient's annotations, or each
+single annotation) and a half-width $d$ µm, let $d_\text{px}=d/0.325$ and
 
-The invasive margin (IM) has an established width in digital pathology. We report
-several rather than committing to one, so the reader can see threshold sensitivity.
+$$
+\text{margin band}=\big(P\oplus d_\text{px}\big)\setminus\big(P\ominus d_\text{px}\big),
+\qquad
+\text{deep core}=P\ominus d_\text{px},
+$$
 
-```{r thresholds-table, echo=FALSE}
-THRESHOLDS_UM <- c(100, 250, 500)   # half-width of the band, each side of the border
-
-tibble::tribble(
-  ~`d (µm each side)`, ~Basis,
-  "100",  "Juxtatumoral zone used in breast/melanoma margin studies; captures immediate peri-tumoural immunity.",
-  "250",  "Mid-range of the 200–500 µm invasive-margin interval cited by Immunoscore consensus reviews.",
-  "500",  "Consensus-Immunoscore standard IM half-width (Galon 2014; Pagès 2018); the default in QuPath IM workflows."
-) |>
-  knitr::kable(caption = paste(
-    "Invasive-margin band half-widths analysed. The Immunoscore scores CD3/CD8",
-    "densities in the tumour core and a 500 µm invasive margin; some IM-detection",
-    "algorithms extend to 1000 µm."))
-```
-
-`d` is a physical distance in microns; each slide's polygon may be in pixels or
-microns, so the helper converts `d` into that slide's coordinate units via the
-per-patient `um_per_px = 0.325` alignment chosen for the annotation (the
-`um_per_unit` column below records the conversion actually used).
-
-## Build margin and core regions, assign cells
+where $\oplus/\ominus$ are `st_buffer` by $\pm d_\text{px}$ (`margin_regions`). If
+$d_\text{px}$ exceeds the core inradius, $P\ominus d_\text{px}=\varnothing$ and the
+margin band falls back to the full outer buffer. Thresholds analysed: $d\in\{100,
+250, 500\}$ µm (500 µm is the consensus-Immunoscore invasive-margin half-width).
 
 ```{r periphery-metrics}
-UM_PER_PX <- 0.325
+THRESHOLDS_UM <- c(100, 250, 500)
+UM_PER_PX     <- 0.325
 
 annots <- load_annotations(patient_ids = neoplastic_data$SAMPLE)
 
-# Two rows per (patient, threshold): region = "margin" (±d band) and "core"
-# (interior beyond d). Union collapses a patient's annotations to one core;
-# per-annotation keeps each polygon separate.
 peri_union   <- ihc_periphery_metrics(ihc_data, annots, scope = "union",
                                        thresholds_um = THRESHOLDS_UM, um_per_px = UM_PER_PX)
 peri_per_ann <- ihc_periphery_metrics(ihc_data, annots, scope = "per_annotation",
@@ -94,12 +77,18 @@ cat("union rows:", nrow(peri_union),
     "| per-annotation rows:", nrow(peri_per_ann), "\n")
 ```
 
-### Did the band actually capture cells? (union, per threshold)
+## Per-region quantities
 
-`n_inside == 0` in the margin means the band landed on no cells (band too thin, or
-the annotation frame is off for that slide — cross-check `clinical_data.Rmd`'s sf
-diagnostics). `area_mm2` is the physical band/core area; `source` records which
-pixel/micron alignment was used.
+For the cell set $S$ inside a region (`st_within`), `region_ratios_area(S, A_px)`
+returns the membership counts (as in `clinical_data.Rmd`) plus:
+
+$$
+\text{area\_mm2}=A_\text{px}\cdot\frac{0.325^2}{10^6},\qquad
+\text{dens\_}\ast\text{\_per\_mm2}=\frac{n_\ast}{\text{area\_mm2}},
+$$
+
+for $\ast\in\{$all, cd45, CD8T, CD4T, Treg, NK$\}$; densities are `NA` when the
+region is empty. `cd45_over_inside` $= n_\text{cd45}/n_\text{inside}$ as before.
 
 ```{r periphery-coverage, echo=FALSE}
 peri_union |>
@@ -108,15 +97,15 @@ peri_union |>
          n_inside, n_cd45_inside, cd45_over_inside) |>
   arrange(patient_id, region) |>
   knitr::kable(digits = 3,
-    caption = "Cells and area captured per region at d = 500 µm (union). n_inside = 0 ⇒ empty region.")
+    caption = "Cells and area per region at d = 500 µm (union). n_inside = 0 ⇒ empty region.")
 ```
 
 ## Margin immunity vs clinical HOT score
 
-Immune content of the invasive-margin band vs the continuous clinical `HOT score`,
-across all thresholds. We show both the **fraction** (CD45+ / all cells in the band)
-and the **density** (CD45+ per mm², the Immunoscore's native unit) — a sparse band
-can read immune-rich by fraction yet low by density.
+Statistic: Spearman $\rho$ (per threshold) between the margin-band value and the
+numeric `HOT score`, computed for both the **fraction**
+$\text{cd45\_over\_inside}=n_\text{cd45}/n_\text{inside}$ and the **density**
+$\text{dens\_cd45\_per\_mm2}=n_\text{cd45}/\text{area\_mm2}$.
 
 ```{r hot-join}
 clin <- clinical_data |>
@@ -149,7 +138,6 @@ if (nrow(df) > 2) {
               hjust = -0.05, vjust = 1.2, inherit.aes = FALSE, size = 3) +
     facet_wrap(~ threshold_um, labeller = labeller(threshold_um = ~ paste0("d = ", .x, " µm"))) +
     labs(title = "Invasive-margin immune fraction vs clinical HOT score",
-         subtitle = "CD45+ fraction inside the ±d margin band, per threshold",
          x = "CD45+ fraction in margin band", y = "clinical HOT score") +
     theme_classic(base_size = 11)
 }
@@ -170,18 +158,20 @@ if (nrow(df) > 2) {
               hjust = -0.05, vjust = 1.2, inherit.aes = FALSE, size = 3) +
     facet_wrap(~ threshold_um, labeller = labeller(threshold_um = ~ paste0("d = ", .x, " µm"))) +
     labs(title = "Invasive-margin immune density vs clinical HOT score",
-         subtitle = "CD45+ cells per mm² in the ±d margin band (Immunoscore unit), per threshold",
          x = "CD45+ per mm² in margin band", y = "clinical HOT score") +
     theme_classic(base_size = 11)
 }
 ```
 
-## Margin immunity by clinical immuno-phenotype (hot / cold)
+## Margin immunity by clinical immuno-phenotype
+
+Distribution of the margin-band CD45+ fraction within each `Immuno-phenotype`
+group (ordered cold $\to$ intermediate $\to$ hot), faceted by threshold.
 
 ```{r phenotype-boxplot, fig.height=4}
 df <- margin_union |>
   filter(!is.na(immuno_phe), is.finite(cd45_over_inside)) |>
-  mutate(immuno_phe = hotcold_order(immuno_phe))   # cold -> intermediate -> hot
+  mutate(immuno_phe = hotcold_order(immuno_phe))
 if (dplyr::n_distinct(na.omit(df$immuno_phe)) > 1 && nrow(df) > 3) {
   ggplot(df, aes(immuno_phe, cd45_over_inside, colour = immuno_phe)) +
     geom_boxplot(outlier.shape = NA) +
@@ -190,25 +180,24 @@ if (dplyr::n_distinct(na.omit(df$immuno_phe)) > 1 && nrow(df) > 3) {
     scale_colour_manual(values = hotcold_cols(levels(df$immuno_phe)),
                         name = "Immuno-phenotype") +
     labs(title = "Invasive-margin immune fraction by clinical immuno-phenotype",
-         subtitle = "CD45+ fraction in the ±d margin band; hot = red, cold = light blue",
          x = NULL, y = "CD45+ fraction in margin band") +
     theme_classic(base_size = 11) +
     theme(axis.text.x = element_text(angle = 30, hjust = 1))
 }
 ```
 
-## Margin-vs-core: recovering the inflamed / excluded / desert axis
+## Margin-vs-core exclusion score
 
-The headline periphery readout. For each patient we contrast immune content in the
-**margin band** against the **deep core**:
+Per patient at $d=500$ µm, with margin and core CD45+ fractions:
 
-- **core-dominant** (margin ≈ core, both non-trivial) → *inflamed / hot*;
-- **margin-dominant** (margin ≫ core) → *immune-excluded / cold*;
-- **both low** → *immune-desert / cold*.
+$$
+\text{exclusion\_frac}=\text{cd45\_over\_inside}_\text{margin}-\text{cd45\_over\_inside}_\text{core},
+$$
+$$
+\text{exclusion\_dens}=\text{dens\_cd45\_per\_mm2}_\text{margin}-\text{dens\_cd45\_per\_mm2}_\text{core}.
+$$
 
-We summarise this with an **exclusion score** = (margin CD45+ fraction) − (core
-CD45+ fraction): positive means immunity is stuck at the border. Shown at the
-consensus `d = 500 µm`.
+Positive $\Rightarrow$ immunity concentrated at the border.
 
 ```{r margin-core}
 mc <- peri_union |>
@@ -229,7 +218,7 @@ mc |>
          exclusion_frac, hot_score) |>
   arrange(desc(exclusion_frac)) |>
   knitr::kable(digits = 3,
-    caption = "Margin-vs-core CD45+ fraction at d = 500 µm. Positive exclusion_frac ⇒ immunity concentrated at the border (excluded pattern).")
+    caption = "Margin-vs-core CD45+ fraction at d = 500 µm. Positive exclusion_frac ⇒ border-concentrated immunity.")
 ```
 
 ```{r margin-core-scatter, fig.height=4.5}
@@ -242,8 +231,7 @@ if (nrow(sc) > 1) {
     geom_abline(slope = 1, linetype = "dashed", colour = "grey50") +
     geom_point(size = 3, alpha = 0.85) +
     coord_equal() +
-    labs(title = "Immune spatial phenotype: margin vs core (d = 500 µm)",
-         subtitle = "Above the line = margin-dominant (excluded); on the line = inflamed; bottom-left = desert",
+    labs(title = "Margin vs core CD45+ fraction (d = 500 µm)",
          x = "CD45+ fraction, deep core", y = "CD45+ fraction, invasive margin",
          colour = "Immuno-phenotype") +
     theme_classic(base_size = 11)
@@ -264,19 +252,18 @@ if (dplyr::n_distinct(na.omit(df$immuno_phe)) > 1 && nrow(df) > 3) {
     geom_boxplot(outlier.shape = NA) +
     geom_jitter(width = 0.2, alpha = 0.6) +
     scale_colour_manual(values = hotcold_cols(levels(df$immuno_phe)), name = "Immuno-phenotype") +
-    labs(title = "Margin-minus-core immune exclusion score by clinical phenotype",
-         subtitle = "d = 500 µm. Expectation: excluded/cold > 0 (border-trapped); inflamed/hot ≈ 0 or < 0",
+    labs(title = "Margin-minus-core exclusion score by clinical phenotype (d = 500 µm)",
          x = NULL, y = "exclusion score (margin − core CD45+ fraction)") +
     theme_classic(base_size = 11) +
     theme(axis.text.x = element_text(angle = 30, hjust = 1))
 }
 ```
 
-## Single annotations vs union (robustness)
+## Single annotations vs union
 
-The union collapses a patient to one core; single annotations test whether the
-margin readout is stable across a patient's separately drawn regions. Points are
-individual annotations; the line links each to that patient's union value.
+Per-annotation margin fraction (each single-annotation core) vs the patient's union
+margin fraction, at $d=500$ µm — a stability check across a patient's separately
+drawn regions.
 
 ```{r per-ann-vs-union, fig.height=4.5}
 pa <- peri_per_ann |>
@@ -293,18 +280,17 @@ if (nrow(cmp) > 1) {
     geom_point(aes(y = union_cd45), colour = "grey40", size = 3, shape = 18) +
     geom_jitter(aes(colour = annotation), width = 0.05, size = 2, alpha = 0.85) +
     labs(title = "Margin immune fraction: single annotations vs union (d = 500 µm)",
-         subtitle = "Diamonds = per-patient union; coloured points = individual annotations",
          x = "patient", y = "CD45+ fraction in margin band", colour = "annotation") +
     theme_classic(base_size = 11) +
     theme(axis.text.x = element_text(angle = 30, hjust = 1))
 }
 ```
 
-## Margin immune composition (three denominators)
+## Margin composition (three denominators)
 
-The same ATTEND-style normalisation used inside the tumour, applied to the margin
-band at `d = 500 µm`: each lineage as a fraction of all cells / of tumour cells /
-of CD45+ cells in the band.
+The same three-denominator composition used inside the tumour
+($\text{frac\_inside}=n_\ell/n_\text{inside}$, $\text{frac\_tumor}=n_\ell/n_\text{tumor}$,
+$\text{frac\_cd45}=n_\ell/n_\text{cd45}$), applied to the margin band at $d=500$ µm.
 
 ```{r margin-composition, fig.height=5}
 comp <- peri_union |>
@@ -325,7 +311,6 @@ if (nrow(comp) > 0) {
     facet_wrap(~ normalization, scales = "free_y") +
     scale_fill_manual(values = oi, guide = "none") +
     labs(title = "Immune composition in the invasive-margin band (d = 500 µm)",
-         subtitle = "Same counts, three denominators.",
          x = NULL, y = "fraction") +
     theme_classic(base_size = 11) +
     theme(axis.text.x = element_text(angle = 30, hjust = 1))
@@ -334,22 +319,10 @@ if (nrow(comp) > 0) {
 
 ## Notes
 
-- **Thresholds are reported, not chosen.** 100 / 250 / 500 µm span the peritumoral
-  literature; 500 µm is the consensus-Immunoscore standard. Read the panels across
-  thresholds — a signal that only appears at one width is threshold-dependent.
-- **Band width is physical.** Each slide's polygon is buffered in its own units;
-  `um_per_unit` records the µm→unit conversion actually used (derived from the
-  `.align_xy` pixel/micron choice). If a patient's `source` is an unexpected
-  alignment, treat that patient's band width as suspect.
-- **Geojson-only.** Unlike the inside-the-annotation checks, there is no CSV
-  fallback — a margin band needs a real boundary, so only patients with a
-  pathologist geojson are covered.
-- **Fraction vs density.** The margin band is thin; a high CD45+ *fraction* with a
-  low CD45+ *density* means few immune cells in an even sparser band. The
-  Immunoscore uses density (per mm²) for this reason.
-- **Small cohort.** As in `clinical_data.Rmd`, only a handful of slides are
-  annotated; Spearman with reported `n` throughout, associations are descriptive.
-- **Exclusion score is a contrast, not a classifier.** It orders patients on the
-  inflamed↔excluded axis; the desert case (both regions sparse) shows as a small
-  score for a different reason, so read it alongside the absolute densities.
-```
+- Band width is physical: each polygon is buffered by $d/0.325$ pixel units; the
+  `um_per_unit` column echoes the $0.325$ µm/px conversion used.
+- Geojson-only: a margin band needs a real boundary, so only patients with a
+  pathologist geojson are covered (no `Out_of_annotation` fallback).
+- Fraction vs density: a thin band can read immune-rich by fraction yet sparse by
+  density (per mm²) — the Immunoscore unit.
+- Small cohort; Spearman with reported $n$ throughout.

@@ -30,55 +30,39 @@ invisible(capture.output(suppressMessages(source(here("code", "test.R")))))
 source(here("code", "validation_helpers.R"))
 ```
 
-## Purpose
+## Starting data and notation
 
-Validate the IHC immune-cell fractions against **bulk-RNA deconvolution**. Run
-every applicable `immunedeconv` method, map each method's cell types onto the IHC
-phenotype lineages, correlate per lineage across patients, rank **which method
-agrees best with the IHC readout**, and cross-check **how well the methods agree
-with each other** (an IHC-independent consistency check).
+Every value below is derived from two inputs, bridged by the clinical table:
 
-IHC reference = whole-slide lineage fractions from `phenotype_clean` (CD8T, CD4T,
-Treg, NK).
+- `ihc_data` — FlowPath single cells deduplicated to **one copy per patient**
+  (whole slide, no annotation boundary). $C_p$ is the set of all cells of patient
+  $p$; $\text{lineage}(c)$ is `phenotype_clean` collapsed via the `phenotype_lineage`
+  table.
+- `counts_data` — DESeq2-normalized bulk RNA, one row per sample, one column per
+  gene, keyed by `Sample` (a CRF id).
+- `clinical_data` — supplies the CRF$\leftrightarrow$slide id bridge.
 
-### Scope: why four lineages, and which methods
+Id spaces and the bridge. Bulk RNA lives in **CRF-id** space; IHC lives in
+**slide-id** space. `slide_key()` maps any id to the shared numeric slide space
+(strip non-digits, apply the verified typo fix `15879`$\to$`15897`). `norm_id()`
+upper-cases and strips non-alphanumerics. `crf_to_slide_map(clinical_data)` returns
+a named vector $\texttt{crf2slide}[\,\text{crf}\,]=\text{slide}$, built from
+`norm_id(`ID CRF PRESERVE`)`$\to$`slide_key(`ID PATIENT`)`.
 
-**Why only four cell types are compared.** The deconvolution methods emit many
-cell types (xCell ~64, quanTIseq ~10, CIBERSORT/LM22 22). The *comparison* is
-capped by the reference, not the methods: it is anchored to the IHC panel, whose
-`phenotype_clean` labels map cleanly onto only four lineages — CD8T, CD4T, Treg,
-NK (`comparable_lineages`; the map is `phenotype_lineage` in
-`validation_helpers.R`). The panel has **no macrophage or B-cell phenotype**, so
-those deconvolution outputs have no phenotype-level IHC counterpart and cannot be
-validated here (`bulkRna.Rmd` does a marker-level CD163/CD14 check instead).
-`deconv_to_lineage()` collapses each method's many types down to these four; every
-other type maps to `NA` and is dropped from the concordance. So "few cell types"
-is a property of the validation target, and widening it needs a richer IHC panel,
-not more methods.
-
-**Why these methods (and the two that need extra inputs).** Methods differ in what
-they need to run:
-
-- **Run on a bulk matrix alone** — quanTIseq, EPIC (absolute fractions, apples-to-
-  apples with IHC), MCPcounter, xCell (relative scores), and **ABIS**. All enabled.
-- **Need a cancer-type indication per sample** — **TIMER**, **ConsensusTME**.
-  Enabled only if `INDICATIONS` is set (this cohort doesn't encode a TCGA code).
-- **License-gated signature** — **CIBERSORT / CIBERSORT (abs.)** need `CIBERSORT.R`
-  + `LM22.txt` from cibersort.stanford.edu. Scaffolded: run if the files are
-  configured, skipped cleanly otherwise.
-- **Need a single-cell reference** — **BayesPrism** (and the other second-generation
-  methods) are not in `immunedeconv`'s bulk interface; they live in the sibling
-  `omnideconv` package and require a cell-type-annotated scRNA-seq reference, which
-  this project does not ship. Scaffolded: run if a reference is dropped in,
-  skipped cleanly otherwise.
-
-So the original four were simply the subset that runs with zero extra artifacts;
-the sections below add the rest behind graceful guards.
+Comparison is anchored to $\mathcal{L}=\{$CD8T, CD4T, Treg, NK$\}$
+(`comparable_lineages`) — the only IHC phenotype lineages with a clean
+deconvolution counterpart. `deconv_to_lineage()` maps each method's cell-type
+string to an $\ell\in\mathcal{L}$ (case-insensitive pattern match:
+`regulatory|treg`$\to$Treg, `cd8`$\to$CD8T, `cd4`$\to$CD4T,
+`^nk|nk cell|natural killer`$\to$NK), everything else to `NA`. All correlations
+are Spearman $\rho$ via `paired_spearman` (rank-based; `NA` when $n<3$ shared
+patients or either vector is constant).
 
 ## Bulk-RNA expression matrix
 
-`immunedeconv` wants a gene × sample matrix with gene symbols as row names.
-`counts_data` is DESeq2-normalized (sample × gene); transpose it.
+$\texttt{expr\_mat}$ is `counts_data` (sample $\times$ gene) transposed to
+gene $\times$ sample, cast double, with gene symbols as row names:
+$\texttt{expr\_mat}[g,s]=\texttt{counts\_data}[s,g]$.
 
 ```{r expr-matrix}
 expr_mat <- counts_data |>
@@ -95,6 +79,19 @@ cat("expression matrix:", nrow(expr_mat), "genes x", ncol(expr_mat), "samples\n"
 > *cross-patient ranking* (what the Spearman validation uses) is robust to this.
 
 ## Method configuration
+
+Each method is gated by the inputs it needs, not preference:
+
+- `methods_free` (quanTIseq, EPIC, MCPcounter, xCell, ABIS) — run on `expr_mat`
+  alone. Always enabled.
+- `methods_indication` (TIMER, ConsensusTME) — need one cancer-type code per
+  sample (`INDICATIONS`, length $=$ `ncol(expr_mat)`). Enabled iff `INDICATIONS`
+  is non-`NULL`; here it is `NULL`, so both are skipped.
+- CIBERSORT / CIBERSORT (abs.) — license-gated `CIBERSORT.R` + `LM22.txt`, paths
+  from env vars `CIBERSORT_BINARY` / `CIBERSORT_MAT`. Run iff both are set and the
+  files exist.
+- BayesPrism — needs an scRNA-seq reference at `data/sc_reference.rds` via
+  `omnideconv`. Run iff present.
 
 ```{r method-config}
 # First-generation methods that run on the bulk matrix with no extra artifacts.
@@ -118,6 +115,13 @@ SC_REFERENCE <- here("data", "sc_reference.rds")
 ```
 
 ## Run deconvolution methods
+
+Each enabled method $m$ produces a cell-type $\times$ sample score table,
+pivoted long to rows $(\text{cell\_type}, \text{sample}, \text{score}, m)$. Then
+$\text{crf\_id}=\texttt{norm\_id}(\text{sample})$,
+$\text{patient\_id}=\texttt{crf2slide}[\text{crf\_id}]$ (slide space), and
+$\text{lineage}=\texttt{deconv\_to\_lineage}(\text{cell\_type})$. Rows with no
+slide crosswalk (`patient_id` is `NA`) are dropped.
 
 ```{r deconvolve}
 # Bulk RNA samples are in CRF-id space; IHC is slide-id space. Bridge via clinical
@@ -168,14 +172,16 @@ if (requireNamespace("immunedeconv", quietly = TRUE)) {
 
 ## BayesPrism (single-cell reference; scaffolded)
 
-`immunedeconv`'s `deconvolute()` covers only bulk-signature methods. BayesPrism is
-a **second-generation** method: it estimates fractions from a cell-type-annotated
-scRNA-seq reference, via the sibling **`omnideconv`** package. This project ships
-no such reference, so the block below is a ready-to-run scaffold — it activates
-only when a reference is present at `data/sc_reference.rds` (an `.rds` holding a
-list: `counts` = gene×cell matrix, `labels` = per-cell type, `batch` = per-cell
-sample id), and skips cleanly otherwise. Verify the argument names against your
-installed `omnideconv` version before trusting the numbers.
+`immunedeconv::deconvolute()` covers only bulk-signature methods. BayesPrism is a
+second-generation method (fractions from a cell-type-annotated scRNA-seq
+reference, via `omnideconv`); this project ships no reference, so the block is a
+ready-to-run scaffold that activates only when `data/sc_reference.rds` is present
+(an `.rds` list: `counts` = gene$\times$cell, `labels` = per-cell type, `batch` =
+per-cell sample id) and skips cleanly otherwise. Its output is mapped to
+$(\text{patient\_id}, \text{lineage})$ by the same
+$\texttt{norm\_id}\to\texttt{crf2slide}$ / `deconv_to_lineage` pipeline as the
+other methods, then row-bound into `deconv_long`. Verify the `omnideconv`
+argument names against your installed version before trusting the numbers.
 
 ```{r bayesprism}
 bayes_long <- NULL
@@ -218,6 +224,19 @@ if (!is.null(bayes_long) && !is.null(deconv_long)) {
 
 ## IHC lineage fractions (reference)
 
+`ihc_lineage_fraction(ihc_data)` counts cells per $(p,\ell)$ and normalises by the
+patient's total cell count (over **all** lineages, `NA` included), giving the
+whole-slide fraction
+
+$$
+\text{ihc\_frac}_{p,\ell}=\frac{|\{c\in C_p:\text{lineage}(c)=\ell\}|}{|C_p|}.
+$$
+
+Restricted to $\ell\in\mathcal{L}$, then **completed to 0** across the full
+$\{p\}\times\mathcal{L}$ grid: a lineage a patient simply lacks reads as $0$
+(present), not a missing row — otherwise the `inner_join` below would silently
+drop that patient from that lineage's panel.
+
 ```{r ihc-lineages}
 lin_raw <- ihc_lineage_fraction(ihc_data) |>
   filter(lineage %in% comparable_lineages) |>
@@ -237,9 +256,15 @@ cat("IHC patients with lineage fractions:", dplyr::n_distinct(ihc_lin$patient_id
 
 ## Method vs IHC — per-lineage concordance
 
-For each method, collapse its cell types to the four comparable lineages (sum
-where a method splits a lineage, e.g. quanTIseq's M1/M2 do not map here), join to
-the IHC fraction on patient + lineage, and correlate across patients.
+Per-$(m,p,\ell)$ score sums a method's sub-types mapping to the same lineage
+(e.g. two NK sub-types):
+
+$$
+\text{score}_{m,p,\ell}=\sum_{\substack{\text{rows of }m\text{ for }p\\ \texttt{deconv\_to\_lineage}(\text{cell\_type})=\ell}} \text{score}.
+$$
+
+This is inner-joined to $\text{ihc\_frac}_{p,\ell}$ on $(p,\ell)$, keeping finite
+pairs.
 
 ```{r concordance}
 paired <- NULL
@@ -255,6 +280,12 @@ if (!is.null(deconv_long) && nrow(deconv_long) > 0) {
   cat("paired (method x lineage x patient) rows:", nrow(paired), "\n")
 }
 ```
+
+Per $(m,\ell)$, concordance is the cross-patient Spearman
+$\rho_{m,\ell}=\texttt{paired\_spearman}(\text{score}_{m,\cdot,\ell},\ \text{ihc\_frac}_{\cdot,\ell})$.
+Method ranking is the mean over lineages,
+$\overline{\rho}_m=\operatorname{mean}_{\ell}\rho_{m,\ell}$ (`na.rm`), with
+$n_\ell=\#\{\ell:\rho_{m,\ell}\text{ finite}\}$.
 
 ```{r concordance-table}
 if (!is.null(paired) && nrow(paired) > 0) {
@@ -277,6 +308,9 @@ if (!is.null(paired) && nrow(paired) > 0) {
 }
 ```
 
+Scatter of $\text{ihc\_frac}$ ($x$) vs $\text{score}$ ($y$), faceted method
+$\times$ lineage.
+
 ```{r concordance-plot}
 if (!is.null(paired) && nrow(paired) > 0) {
   ggplot(paired, aes(ihc_frac, score)) +
@@ -291,13 +325,9 @@ if (!is.null(paired) && nrow(paired) > 0) {
 
 ## Cross-method agreement (methods vs each other and vs IHC)
 
-Concordance with IHC only tells us which method matches *one* reference. Whether the
-methods agree with **each other** is an independent consistency check: cell types on
-which several independent algorithms converge are more trustworthy, and a method
-that agrees with the others but not IHC (or vice-versa) localises where the
-disagreement is. We treat IHC as one more "source" and compute, for every source
-pair, the mean Spearman across the four lineages (rank-based, so the methods'
-different score scales don't matter).
+Treat IHC as one more "source" alongside each method, giving one value per
+$(\text{source}, p, \ell)$: the per-lineage deconvolution score for a method, or
+$\text{ihc\_frac}$ for source `IHC`.
 
 ```{r agreement}
 agr <- NULL
@@ -315,6 +345,22 @@ if (!is.null(deconv_long) && nrow(deconv_long) > 0) {
   agr <- pairwise_agreement(agree_src)
 }
 ```
+
+`pairwise_agreement` returns a symmetric long table over every ordered source
+pair $(a,b)$. For $a=b$ the entry is fixed at $\text{mean\_rho}=1$
+($\text{n\_lineages}=$ `NA`). For $a\neq b$ it inner-joins the two sources on
+$(p,\ell)$ (their shared patients), computes a per-lineage Spearman
+$\rho_\ell=\texttt{paired\_spearman}(\text{value}_a,\text{value}_b)$ across those
+shared patients, then averages:
+
+$$
+\text{mean\_rho}(a,b)=\operatorname{mean}_{\ell}\rho_\ell\ (\text{na.rm}),\qquad
+\text{n\_lineages}(a,b)=\#\{\ell:\rho_\ell\text{ finite}\}.
+$$
+
+If the join is empty (no shared patients) the entry is $\text{mean\_rho}=$ `NA`,
+$\text{n\_lineages}=0$. Rank-based throughout, so the methods' differing score
+scales do not matter.
 
 ```{r agreement-heatmap, fig.height=6}
 if (!is.null(agr) && nrow(agr) > 0) {
@@ -344,6 +390,11 @@ if (!is.null(agr) && nrow(agr) > 0) {
 }
 ```
 
+Per source $a$: $\text{mean\_rho\_vs\_others}=\operatorname{mean}_{b\neq a}\text{mean\_rho}(a,b)$
+(agreement with the consensus of the others) and $\text{rho\_vs\_IHC}=\text{mean\_rho}(a,\text{IHC})$
+(agreement with IHC alone). A high vs-others but low vs-IHC source (or the reverse)
+localises where methods and IHC diverge.
+
 ```{r agreement-ranks}
 if (!is.null(agr) && nrow(agr) > 0) {
   # How much each source agrees with the consensus of the OTHERS (mean off-diagonal),
@@ -362,24 +413,21 @@ if (!is.null(agr) && nrow(agr) > 0) {
 
 ## Notes
 
-- Absolute-fraction methods (quanTIseq, EPIC, CIBERSORT abs., ABIS) are the fair
-  apples-to-apples comparison; MCPcounter/xCell/CIBERSORT (rel.) scores are
-  relative, so only their *rank* correlation is meaningful, not the slope. The
-  cross-method agreement panel is Spearman throughout for exactly this reason.
-- Only CD8T / CD4T / Treg / NK are compared — the IHC panel has no macrophage or
-  B-cell phenotype, so those deconvolution outputs have no phenotype-level IHC
-  counterpart (see `bulkRna.Rmd` for a marker-level CD163/CD14 check instead).
-  Widening the comparison needs a richer IHC panel, not more methods.
-- Method coverage is gated by inputs, not preference: quanTIseq/EPIC/MCPcounter/
-  xCell/ABIS run out of the box; TIMER/ConsensusTME need `INDICATIONS`;
-  CIBERSORT needs its license-gated `LM22.txt` + `CIBERSORT.R`; BayesPrism needs
-  an scRNA-seq reference at `data/sc_reference.rds` via `omnideconv`. Each is
-  skipped cleanly (with a message) when its input is absent, so the report always
-  knits with whatever is available.
+- Relative-score methods (MCPcounter, xCell, CIBERSORT rel.) are rank-only; their
+  slope against IHC is not meaningful, so every statistic here is Spearman.
+  Absolute-fraction methods (quanTIseq, EPIC, CIBERSORT abs., ABIS) are the fair
+  apples-to-apples comparison but are still compared by rank for uniformity.
+- Only $\mathcal{L}=\{$CD8T, CD4T, Treg, NK$\}$ are compared: the IHC panel has no
+  macrophage or B-cell phenotype, so `deconv_to_lineage` returns `NA` for those
+  and they are dropped (`bulkRna.Rmd` does a marker-level CD163/CD14 check
+  instead).
+- Cross-patient Spearman needs $\ge 3$ shared patients (and non-constant vectors);
+  sparser $(m,\ell)$ or source pairs return `NA` rather than a spurious
+  correlation, and `mean_rho`/`mean_rho` averages over the finite lineages only.
+  With this cohort's size the agreement matrix is descriptive — read it for
+  *pattern*, not significance.
 - The CIBERSORT and BayesPrism blocks are scaffolds — verify `set_cibersort_*()`
   and `omnideconv::build_model()/deconvolute()` argument names against your
   installed versions before trusting their output.
-- Cross-patient Spearman needs ≥ 3 shared patients per lineage; sparser cells
-  return `NA` rather than a spurious correlation. With this cohort's size the
-  agreement matrix is descriptive — read it for *pattern* (which methods cluster),
-  not significance.
+</content>
+</invoke>
