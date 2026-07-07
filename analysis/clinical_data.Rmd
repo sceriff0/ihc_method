@@ -139,10 +139,26 @@ cc_union <- ihc_tumor_union |>
 
 cat("per-annotation pairs:", nrow(cc_ann), " | union pairs:", nrow(cc_union), "\n")
 
-ihc_tumor_union |>
-  select(patient_id, source, n_inside, tumor_over_inside) |>
-  arrange(n_inside) |>
-  knitr::kable(digits = 3, caption = "Cells inside each patient's tumour region (union).")
+# Diagnostic: the ACTUAL pairs that enter the correlation, largest gap first. Read
+# the top rows to tell WHY the correlation is what it is:
+#   - big gap + source == "csv" or tiny n_inside  -> suspect membership, not biology
+#   - big gap + healthy sf patient                -> genuine IHC/pathologist disagreement
+#   - per-annotation only: verify geojson _a<k> lines up with pathologist ANNOTATION_k
+cc_union |>
+  transmute(patient_id, source, n_inside,
+            ihc_tumor_frac = round(tumor_over_inside, 3),
+            path_frac      = round(path_frac, 3),
+            abs_gap        = round(abs(tumor_over_inside - path_frac), 3)) |>
+  arrange(desc(abs_gap)) |>
+  knitr::kable(caption = "UNION concordance pairs (largest IHC-vs-pathologist gap first).")
+
+cc_ann |>
+  transmute(patient_id, annotation, source, n_inside,
+            ihc_tumor_frac = round(tumor_over_inside, 3),
+            path_frac      = round(path_frac, 3),
+            abs_gap        = round(abs(tumor_over_inside - path_frac), 3)) |>
+  arrange(desc(abs_gap)) |>
+  knitr::kable(caption = "PER-ANNOTATION concordance pairs (largest gap first). Confirm each geojson _a<k> is the pathologist's ANNOTATION_k.")
 ```
 
 **Concordance statistic.** `paired_spearman(x, y)` = Spearman rank correlation
