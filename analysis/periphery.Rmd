@@ -19,8 +19,8 @@ suppressPackageStartupMessages({
 knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE,
                       fig.width = 9, fig.height = 6)
 
-# Loaders (dds, clinical_data, neoplastic_data, counts_data, ihc_data, ihc_annot)
-# and the shared validation helpers. test.R prints colnames() on load; silence it.
+# Loaders (dds, clinical_data, neoplastic_data, counts_data, ihc_data) and the
+# shared validation helpers. test.R prints colnames() on load; silence it.
 invisible(capture.output(suppressMessages(source(here("code", "test.R")))))
 source(here("code", "validation_helpers.R"))
 ```
@@ -33,33 +33,34 @@ polygons (in **pixels**), and the clinical `HOT score` / `Immuno-phenotype`.
 
 Unlike the inside-the-annotation checks, membership here needs real geometry (a
 distance band cannot come from the binary `Out_of_annotation` flag), so this report
-keeps `sf`. Cells are mapped into the polygon pixel frame by a **fixed** conversion:
+keeps `sf`. Cells are placed in the polygon pixel frame by a **fixed** conversion:
 
-$$
-x_\text{px}=\frac{\texttt{centroid\_x}}{0.325},\qquad
-y_\text{px}=\frac{\texttt{centroid\_y}}{0.325}
-\qquad(0.325\ \mu\text{m/px}).
-$$
+```
+x_px = centroid_x / 0.325
+y_px = centroid_y / 0.325           (0.325 microns per pixel)
+```
 
-One pixel is therefore `um_per_px` $=0.325\ \mu$m, giving the two conversions used
-below: a micron threshold $d$ becomes $d/0.325$ pixel units, and a pixel area
-$A_\text{px}$ becomes $A_\text{px}\cdot 0.325^2/10^6\ \text{mm}^2$.
+So 1 pixel = 0.325 microns, which gives the two conversions used below:
+
+```
+threshold d microns  ->  d / 0.325 pixels
+pixel area A         ->  A * 0.325^2 / 1e6  square millimetres
+```
 
 ## Margin and core regions
 
-For a core polygon $P$ (the dissolved union of a patient's annotations, or each
-single annotation) and a half-width $d$ µm, let $d_\text{px}=d/0.325$ and
+For a core polygon P (the union of a patient's annotations, or each single
+annotation) and a half-width `d` microns, with `d_px = d / 0.325`:
 
-$$
-\text{margin band}=\big(P\oplus d_\text{px}\big)\setminus\big(P\ominus d_\text{px}\big),
-\qquad
-\text{deep core}=P\ominus d_\text{px},
-$$
+```
+margin band = (P grown by d_px)  minus  (P shrunk by d_px)
+deep core   =  P shrunk by d_px
+```
 
-where $\oplus/\ominus$ are `st_buffer` by $\pm d_\text{px}$ (`margin_regions`). If
-$d_\text{px}$ exceeds the core inradius, $P\ominus d_\text{px}=\varnothing$ and the
-margin band falls back to the full outer buffer. Thresholds analysed: $d\in\{100,
-250, 500\}$ µm (500 µm is the consensus-Immunoscore invasive-margin half-width).
+(grow/shrink are `st_buffer` by +/- `d_px`; `margin_regions`.) If `d_px` exceeds
+the core's inradius the shrunk core is empty, and the margin band falls back to the
+full grown buffer. Thresholds analysed: `d` = 100, 250, 500 microns (500 is the
+consensus-Immunoscore invasive-margin half-width).
 
 ```{r periphery-metrics}
 THRESHOLDS_UM <- c(100, 250, 500)
@@ -79,16 +80,19 @@ cat("union rows:", nrow(peri_union),
 
 ## Per-region quantities
 
-For the cell set $S$ inside a region (`st_within`), `region_ratios_area(S, A_px)`
-returns the membership counts (as in `clinical_data.Rmd`) plus:
+For the cells inside a region (`st_within`), `region_ratios_area()` returns the
+membership counts (as in `clinical_data.Rmd`) plus:
 
-$$
-\text{area\_mm2}=A_\text{px}\cdot\frac{0.325^2}{10^6},\qquad
-\text{dens\_}\ast\text{\_per\_mm2}=\frac{n_\ast}{\text{area\_mm2}},
-$$
+```
+area_mm2            = region pixel area * 0.325^2 / 1e6
+dens_all_per_mm2    = n_inside      / area_mm2
+dens_cd45_per_mm2   = n_cd45_inside / area_mm2
+dens_<lineage>_per_mm2 = n_<lineage> / area_mm2    (CD8T, CD4T, Treg, NK)
 
-for $\ast\in\{$all, cd45, CD8T, CD4T, Treg, NK$\}$; densities are `NA` when the
-region is empty. `cd45_over_inside` $= n_\text{cd45}/n_\text{inside}$ as before.
+cd45_over_inside    = n_cd45_inside / n_inside
+```
+
+Densities are `NA` when the region is empty.
 
 ```{r periphery-coverage, echo=FALSE}
 peri_union |>
@@ -102,10 +106,13 @@ peri_union |>
 
 ## Margin immunity vs clinical HOT score
 
-Statistic: Spearman $\rho$ (per threshold) between the margin-band value and the
-numeric `HOT score`, computed for both the **fraction**
-$\text{cd45\_over\_inside}=n_\text{cd45}/n_\text{inside}$ and the **density**
-$\text{dens\_cd45\_per\_mm2}=n_\text{cd45}/\text{area\_mm2}$.
+Statistic: Spearman correlation (per threshold) between the margin-band value and
+the numeric `HOT score`, for both:
+
+```
+fraction = cd45_over_inside   = n_cd45_inside / n_inside
+density  = dens_cd45_per_mm2  = n_cd45_inside / area_mm2
+```
 
 ```{r hot-join}
 clin <- clinical_data |>
@@ -165,8 +172,8 @@ if (nrow(df) > 2) {
 
 ## Margin immunity by clinical immuno-phenotype
 
-Distribution of the margin-band CD45+ fraction within each `Immuno-phenotype`
-group (ordered cold $\to$ intermediate $\to$ hot), faceted by threshold.
+Distribution of the margin-band `cd45_over_inside` within each `Immuno-phenotype`
+group (ordered cold -> intermediate -> hot), faceted by threshold.
 
 ```{r phenotype-boxplot, fig.height=4}
 df <- margin_union |>
@@ -188,16 +195,14 @@ if (dplyr::n_distinct(na.omit(df$immuno_phe)) > 1 && nrow(df) > 3) {
 
 ## Margin-vs-core exclusion score
 
-Per patient at $d=500$ µm, with margin and core CD45+ fractions:
+Per patient at `d = 500` microns:
 
-$$
-\text{exclusion\_frac}=\text{cd45\_over\_inside}_\text{margin}-\text{cd45\_over\_inside}_\text{core},
-$$
-$$
-\text{exclusion\_dens}=\text{dens\_cd45\_per\_mm2}_\text{margin}-\text{dens\_cd45\_per\_mm2}_\text{core}.
-$$
+```
+exclusion_frac = cd45_over_inside (margin)  -  cd45_over_inside (core)
+exclusion_dens = dens_cd45_per_mm2 (margin) -  dens_cd45_per_mm2 (core)
+```
 
-Positive $\Rightarrow$ immunity concentrated at the border.
+Positive means immunity is concentrated at the border.
 
 ```{r margin-core}
 mc <- peri_union |>
@@ -262,8 +267,8 @@ if (dplyr::n_distinct(na.omit(df$immuno_phe)) > 1 && nrow(df) > 3) {
 ## Single annotations vs union
 
 Per-annotation margin fraction (each single-annotation core) vs the patient's union
-margin fraction, at $d=500$ µm — a stability check across a patient's separately
-drawn regions.
+margin fraction, at `d = 500` microns — a stability check across a patient's
+separately drawn regions.
 
 ```{r per-ann-vs-union, fig.height=4.5}
 pa <- peri_per_ann |>
@@ -288,9 +293,14 @@ if (nrow(cmp) > 1) {
 
 ## Margin composition (three denominators)
 
-The same three-denominator composition used inside the tumour
-($\text{frac\_inside}=n_\ell/n_\text{inside}$, $\text{frac\_tumor}=n_\ell/n_\text{tumor}$,
-$\text{frac\_cd45}=n_\ell/n_\text{cd45}$), applied to the margin band at $d=500$ µm.
+The same three-denominator composition used inside the tumour, applied to the
+margin band at `d = 500` microns:
+
+```
+frac_inside = n_<lineage> / n_inside         (of all cells in band)
+frac_tumor  = n_<lineage> / n_tumor_inside   (of tumour cells in band)
+frac_cd45   = n_<lineage> / n_cd45_inside    (of CD45+ cells in band)
+```
 
 ```{r margin-composition, fig.height=5}
 comp <- peri_union |>
@@ -319,10 +329,10 @@ if (nrow(comp) > 0) {
 
 ## Notes
 
-- Band width is physical: each polygon is buffered by $d/0.325$ pixel units; the
-  `um_per_unit` column echoes the $0.325$ µm/px conversion used.
+- Band width is physical: each polygon is buffered by `d / 0.325` pixel units; the
+  `um_per_unit` column echoes the 0.325 µm/px conversion used.
 - Geojson-only: a margin band needs a real boundary, so only patients with a
   pathologist geojson are covered (no `Out_of_annotation` fallback).
 - Fraction vs density: a thin band can read immune-rich by fraction yet sparse by
   density (per mm²) — the Immunoscore unit.
-- Small cohort; Spearman with reported $n$ throughout.
+- Small cohort; Spearman with reported `n` throughout.

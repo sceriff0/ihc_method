@@ -6,15 +6,13 @@
 # helpers derive the quantities each report validates against an independent
 # reference (pathologist / bulk-RNA deconvolution / bulk-RNA marker genes).
 #
-# "Inside the annotation" is read from the FlowPath `Out_of_annotation` flag: the
-# export now writes one csv per (patient, annotation), so the flag is precomputed
-# per ANNOTATION_<k> and point-in-polygon is no longer needed for membership.
-# Multiple annotations per patient are reported both per-annotation and as their
-# union (a cell counts if inside ANY of the patient's annotations).
-#
-# sf/geojson survive ONLY for the invasive-margin (periphery) metrics, where a
-# distance band must be buffered from the real polygon geometry. There the cell
-# centroids (microns) are mapped into the geojson pixel frame by centroid / 0.325.
+# "Inside the annotation" is decided PRIMARY by sf point-in-polygon on the raw
+# pathologist geojson; the FlowPath `Out_of_annotation` flag is used only as a
+# fallback for patients with no geojson. Cell centroids (microns) are mapped into
+# the geojson pixel frame by the fixed conversion centroid / 0.325 (0.325 um/px) —
+# the same mapping used by the invasive-margin (periphery) metrics.
+# FlowPath exports one csv per patient (<patient>.csv); the loader keys patient_id
+# off the filename stem.
 #
 # renv: needs sf, jsonlite (+ tidyverse, here, fs already in the lockfile).
 #   renv::install(c("sf", "jsonlite")); renv::snapshot()
@@ -318,44 +316,62 @@ region_composition <- function(region_metrics,
 # TRUE where a FlowPath `Out_of_annotation` value marks a cell OUTSIDE the region.
 .is_outside <- function(x) tolower(trimws(as.character(x))) %in% c("true", "1", "yes", "t")
 
-# Stable per-cell key within a patient, for OR-ing membership across a patient's
-# annotation files. Prefers the real `cell_id`; falls back to the loader's
-# within-file row index `.cell_row` (the files are row-aligned, identical cells).
-.cell_key <- function(df) {
-  if ("cell_id" %in% names(df)) df$cell_id else df$.cell_row
+# sf point-in-polygon membership for ONE patient's cells against its polygons.
+# Cells (FlowPath centroids) are in MICRONS and the geojson is in PIXELS, so the
+# centroids are mapped in by the FIXED conversion centroid / um_per_px (0.325):
+# x_px = centroid_x / 0.325. (No per-patient scale search — that heuristic is what
+# produced the wrong pixel/micron scale before.) Returns one metrics row per
+# polygon (per_annotation) or one over the dissolved union; source = "sf".
+.annotation_metrics_sf <- function(cells_p, polys_p, scope, um_per_px) {
+  crs <- sf::st_crs(polys_p)
+  pts <- sf::st_as_sf(data.frame(x = cells_p$centroid_x / um_per_px,
+                                 y = cells_p$centroid_y / um_per_px),
+                      coords = c("x", "y"), crs = crs)
+  if (scope == "union") {
+    poly_u <- sf::st_union(sf::st_geometry(polys_p))
+    inside <- lengths(sf::st_within(pts, poly_u)) > 0
+    region_ratios(cells_p[inside, , drop = FALSE]) |>
+      dplyr::mutate(annotation = "union", source = "sf", .before = 1)
+  } else {
+    within <- sf::st_within(pts, polys_p)          # per-cell list of polygon indices
+    purrr::map_dfr(seq_len(nrow(polys_p)), function(i) {
+      inside_i <- vapply(within, function(idx) i %in% idx, logical(1))
+      region_ratios(cells_p[inside_i, , drop = FALSE]) |>
+        dplyr::mutate(annotation = polys_p$annotation[i], source = "sf", .before = 1)
+    })
+  }
 }
 
-# Region metrics per patient from the FlowPath `Out_of_annotation` flag (no sf).
-# `ihc_annot` is the LONG table: one row per cell per annotation file, carrying
-# `patient_id`, `annotation` (ANNOTATION_<k>) and `Out_of_annotation`.
-#   scope = "per_annotation": one row per (patient, annotation); a cell is inside
-#           iff !Out_of_annotation in that annotation's file.
-#   scope = "union":          one row per patient; a cell is inside iff it is
-#           inside ANY of the patient's annotations (OR over `cell_id`).
-# `source` is always "csv" (the flag is the sole membership source now).
-ihc_annotation_metrics <- function(ihc_annot,
-                                    scope = c("per_annotation", "union")) {
+# Region metrics per patient. PRIMARY membership = sf point-in-polygon on the raw
+# pathologist geojson (`annots`, fixed um_per_px scale); FALLBACK = the FlowPath
+# `Out_of_annotation` flag (a cell is inside when the flag is FALSE) for patients
+# with NO geojson. `ihc_data` supplies the cells (centroids + optional flag).
+# `scope` = "per_annotation" (one row per polygon) or "union" (dissolved). The
+# `source` column records sf vs csv provenance per patient; the CSV fallback has no
+# per-polygon breakdown, so it always emits a single row labelled annotation "csv".
+ihc_annotation_metrics <- function(ihc_data, annots,
+                                   scope = c("per_annotation", "union"),
+                                   use_csv_fallback = TRUE, um_per_px = 0.325) {
   scope    <- match.arg(scope)
-  ihc_annot <- dplyr::mutate(ihc_annot, .pid = slide_key(patient_id),
-                             .inside = !.is_outside(Out_of_annotation),
-                             .key = .cell_key(ihc_annot))
+  ihc_data <- dplyr::mutate(ihc_data, .pid = slide_key(patient_id))
+  annots   <- dplyr::mutate(annots,   .pid = slide_key(patient_id))
+  ann_ids  <- unique(annots$.pid)
 
-  purrr::map_dfr(unique(ihc_annot$.pid), function(pid) {
-    cells_p <- dplyr::filter(ihc_annot, .pid == pid)
+  purrr::map_dfr(unique(ihc_data$.pid), function(pid) {
+    cells_p <- dplyr::filter(ihc_data, .pid == pid,
+                             is.finite(centroid_x), is.finite(centroid_y))
+    if (nrow(cells_p) == 0) return(tibble::tibble())
 
-    if (scope == "per_annotation") {
-      purrr::map_dfr(sort(unique(cells_p$annotation)), function(ann) {
-        ca <- dplyr::filter(cells_p, annotation == ann)
-        region_ratios(ca[ca$.inside, , drop = FALSE]) |>
-          dplyr::mutate(patient_id = pid, annotation = ann, source = "csv", .before = 1)
-      })
+    if (pid %in% ann_ids) {
+      polys_p <- dplyr::filter(annots, .pid == pid)
+      .annotation_metrics_sf(cells_p, polys_p, scope, um_per_px) |>
+        dplyr::mutate(patient_id = pid, .before = 1)
+    } else if (use_csv_fallback && "Out_of_annotation" %in% names(cells_p)) {
+      inside <- !.is_outside(cells_p$Out_of_annotation)
+      region_ratios(cells_p[inside, , drop = FALSE]) |>
+        dplyr::mutate(patient_id = pid, annotation = "csv", source = "csv", .before = 1)
     } else {
-      # union: a cell is inside if inside in any annotation; take ONE copy of the
-      # cell (lowest-index file) so counts are not multiplied by the file count.
-      inside_key <- unique(cells_p$.key[cells_p$.inside])
-      base       <- dplyr::filter(cells_p, ann_num == min(ann_num))
-      region_ratios(base[base$.key %in% inside_key, , drop = FALSE]) |>
-        dplyr::mutate(patient_id = pid, annotation = "union", source = "csv", .before = 1)
+      tibble::tibble()  # no geojson and no CSV flag -> nothing to report
     }
   })
 }

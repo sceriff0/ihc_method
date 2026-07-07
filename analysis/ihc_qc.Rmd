@@ -31,23 +31,23 @@ Every value below is derived from a single input, with **no external reference**
 
 - `ihc_data` — FlowPath single cells, deduplicated to **one copy per patient**
   (whole slide). Each cell carries `phenotype_clean` (the parenthetical label in
-  `phenotype`) and, for each marker $m$, the triple
-  $(m\texttt{\_raw},\,m\texttt{\_zscore},\,m\texttt{\_sign})$.
+  `phenotype`) and, for each marker, the triple `<marker>_raw`,
+  `<marker>_zscore`, `<marker>_sign`.
 
-Notation used throughout. Let $C_p$ be all cells of patient $p$ in `ihc_data`, and
-$C=\bigcup_p C_p$ the whole set of imaged cells. `ihc_marker_long(ihc_data)`
-reshapes $C$ to **one row per $(c,m)$ pair** over the markers $m\in M$
-(`ihc_markers` = `marker_gene_map$marker`, excluding `wrongL1CAM`/DAPI), carrying
-per pair the raw value $r_{c,m}$, the z-score $z_{c,m}$, the sign string
-$s_{c,m}$, and the boolean
+Notation used throughout. `ihc_marker_long(ihc_data)` reshapes the whole set of
+imaged cells to **one row per (cell, marker) pair**, over the markers in
+`ihc_markers` (= `marker_gene_map$marker`, excluding `wrongL1CAM`/DAPI). Each row
+carries the raw value, the z-score, the sign string, and a positive flag:
 
-$$
-\text{pos}_{c,m}=\texttt{is\_pos}(s_{c,m})=\mathbf{1}\!\left[\,\operatorname{lower}(\operatorname{trim}(s_{c,m}))\in\{+,\text{pos},\text{positive},\text{yes},\text{true},1\}\,\right].
-$$
+```
+pos(cell, marker) = is_pos(<marker>_sign)
+                  = TRUE when the lower-cased, trimmed sign is one of
+                    +, pos, positive, yes, true, 1
+```
 
-`phenotype_clean` is the cell type $t(c)$. All patient ids are mapped to the
-shared slide space by `slide_key()`. The reports restricts to
-**typed** cells: $t(c)\notin\{\texttt{NA},\text{"Unknown"}\}$.
+`phenotype_clean` is the cell type. All patient ids are mapped to the shared slide
+space by `slide_key()`. The report restricts to **typed** cells: the cell type is
+not NA and not "Unknown".
 
 ```{r marker-long}
 mk_long <- ihc_marker_long(ihc_data) |>
@@ -59,16 +59,18 @@ cat("cells:", dplyr::n_distinct(mk_long$cell_id),
 
 ## 1. Phenotype ↔ marker concordance
 
-For each phenotype $t$ and marker $m$, over the typed pairs
-$\{c : t(c)=t\}$:
+For each phenotype and marker, over the typed cells of that phenotype:
 
-$$
-\text{mean\_z}_{t,m}=\operatorname{mean}_{c:\,t(c)=t} z_{c,m},\qquad
-\text{pct\_pos}_{t,m}=\operatorname{mean}_{c:\,t(c)=t}\text{pos}_{c,m},
-$$
+```
+mean_z(type, marker)  = average of <marker>_zscore over cells of that type
+pct_pos(type, marker) = fraction of those cells positive for the marker
+```
 
-both computed with `na.rm = TRUE`. The heatmap fills each $(m,t)$ tile with
-$\text{mean\_z}_{t,m}$ (diverging scale centred at $0$).
+where:
+- both averages use na.rm = TRUE (a positive cell counts as 1, negative as 0).
+
+The heatmap fills each (marker, type) tile with `mean_z` (diverging scale centred
+at 0).
 
 ```{r concordance-matrix}
 conc <- mk_long |>
@@ -87,24 +89,22 @@ ggplot(conc, aes(marker, phenotype_clean, fill = mean_z)) +
         panel.grid = element_blank())
 ```
 
-**Defining-marker check.** `expected` is a fixed table $D$ giving the defining
-marker $d(t)$ for each phenotype. Within each phenotype the markers are ranked by
-descending mean z-score,
+**Defining-marker check.** `expected` is a fixed table giving the defining marker
+for each phenotype. Within each phenotype the markers are ranked by descending
+mean z-score:
 
-$$
-\text{rank\_z}_{t,m}=\operatorname{rank}\!\big(-\text{mean\_z}_{t,\cdot}\big)_m
-\quad(\text{rank }1=\text{largest mean\_z}),
-$$
+```
+rank_z(type, marker) = rank of the marker's mean_z within the phenotype
+                       (rank 1 = largest mean_z)
+rank_of_defining     = rank_z of that phenotype's defining marker
+pass                 = rank_of_defining <= 2
+```
 
-and the row for $m=d(t)$ is kept (`inner_join` on $D$). The reported
-`rank_of_defining` is $\text{rank\_z}_{t,d(t)}$ and
+where:
+- the defining-marker row is kept by joining on the `expected` table;
+- pass means the defining marker is among the phenotype's top-2 mean-z signals.
 
-$$
-\text{pass}_t=\mathbf{1}\!\left[\text{rank\_z}_{t,d(t)}\le 2\right]
-$$
-
-(defining marker is among the phenotype's top-2 mean-z signals). `mean_z` is
-rounded to 2 dp; rows are sorted by descending `rank_of_defining`.
+`mean_z` is rounded to 2 dp; rows are sorted by descending `rank_of_defining`.
 
 ```{r concordance-expected}
 # Encode the expected defining marker(s) per phenotype and check it is the top
@@ -137,37 +137,35 @@ knitr::kable(check, caption = "Is each phenotype's defining marker among its top
 
 ## 2. Per-channel usability
 
-Per marker $m$, over all cells with finite $z_{c,m}$ (typed and untyped —
+Per marker, over all cells with a finite z-score (typed and untyped —
 `ihc_marker_long(ihc_data)` is re-derived here without the phenotype filter).
 
-**Bimodality.** Sarle's bimodality coefficient on the z-scores $\{z_{c,m}\}$
-($n$ finite values, sample mean $\bar z$, sample sd $\sigma$):
+**Bimodality.** Sarle's bimodality coefficient on the marker's z-scores:
 
-$$
-g=\frac{1}{n}\sum\Big(\frac{z-\bar z}{\sigma}\Big)^3,\quad
-k=\frac{1}{n}\sum\Big(\frac{z-\bar z}{\sigma}\Big)^4-3,\quad
-\text{BC}=\frac{g^2+1}{\,k+\dfrac{3(n-1)^2}{(n-2)(n-3)}\,},
-$$
+```
+BC = (skew^2 + 1) / (kurtosis_excess + 3*(n-1)^2 / ((n-2)*(n-3)))
+```
 
-returning `NA` if $n<4$ or $\sigma=0$. `dip_p` is Hartigan's dip-test p-value
-(`diptest::dip.test`) when the package is installed and $n\ge 4$, else `NA`.
+where:
+- skew = skewness of the finite z-scores (mean of the cubed standardised values);
+- kurtosis_excess = excess kurtosis of those z-scores (mean of the 4th-power
+  standardised values, minus 3);
+- n = number of finite z-scores;
+- BC is NA if n < 4 or the z-score sd is 0.
+
+`dip_p` is Hartigan's dip-test p-value (`diptest::dip.test`) when the package is
+installed and n >= 4, else NA.
 
 **Sign-vs-zscore separability.** With the positive/negative split from
-$\text{pos}_{c,m}$:
+`pos(cell, marker)`:
 
-$$
-\text{neg\_max}_m=\max_{c:\,\lnot\text{pos}} z_{c,m},\qquad
-\text{pos\_min}_m=\min_{c:\,\text{pos}} z_{c,m},
-$$
-
-$$
-\text{separable}_m=\mathbf{1}\!\left[\text{pos\_min}_m>\text{neg\_max}_m\right],\quad
-\text{cutoff}_m=\begin{cases}\tfrac{\text{neg\_max}_m+\text{pos\_min}_m}{2}&\text{separable}\\[2pt]\texttt{NA}&\text{else,}\end{cases}
-$$
-
-$$
-\text{likely\_bimodal}_m=\mathbf{1}\!\left[\text{BC}_m>0.555\ \lor\ (\,\text{dip\_p}_m<0.05\,)\right].
-$$
+```
+neg_max        = largest z-score among the marker's sign-negative cells
+pos_min        = smallest z-score among the marker's sign-positive cells
+separable      = pos_min > neg_max
+cutoff         = (neg_max + pos_min) / 2 when separable, else NA
+likely_bimodal = BC > 0.555 OR dip_p < 0.05
+```
 
 Rows are sorted by descending BC.
 
@@ -207,8 +205,8 @@ knitr::kable(channel_qc, digits = 3,
              caption = "Per-channel bimodality and sign-vs-zscore separability")
 ```
 
-Density of $z_{c,m}$ per marker (finite $z$ and non-`NA` sign only), split by the
-call $\text{pos}_{c,m}$ (`sign +` / `sign -`); facets are free-scaled.
+Density of the z-scores per marker (finite z-score and non-`NA` sign only), split
+by the positive call (`sign +` / `sign -`); facets are free-scaled.
 
 ```{r channel-qc-plot, fig.height=8}
 ihc_marker_long(ihc_data) |>
@@ -225,13 +223,13 @@ ihc_marker_long(ihc_data) |>
 
 ## 3. Morphology by phenotype
 
-Morphology features are the intersection of
-$\{\texttt{area},\texttt{perimeter},\texttt{eccentricity},\texttt{solidity}\}$
-with `names(ihc_data)`, plus circularity when both `area` and `perimeter` exist:
+Morphology features are whichever of `area`, `perimeter`, `eccentricity`,
+`solidity` are present in `ihc_data`, plus circularity when both `area` and
+`perimeter` exist:
 
-$$
-\text{circularity}(c)=\frac{4\pi\,\texttt{area}(c)}{\texttt{perimeter}(c)^2}.
-$$
+```
+circularity = 4 * pi * area / perimeter^2
+```
 
 Over typed cells, each feature is pivoted long and filtered to finite values; the
 plot is a per-phenotype boxplot (phenotypes ordered by median feature value,
@@ -269,5 +267,5 @@ ggplot(morph, aes(reorder(phenotype_clean, value, FUN = median), value,
 - `separable = FALSE` means `_sign` is not a pure threshold on `_zscore` (the
   `_sign+` and `_sign−` z-score ranges overlap — likely thresholded on `_raw`);
   its `cutoff` is then `NA`.
-- `likely_bimodal` uses an inclusive-or of BC $>0.555$ and dip-p $<0.05$; if
+- `likely_bimodal` uses an inclusive-or of BC > 0.555 and dip-p < 0.05; if
   `diptest` is absent the dip-p term is `NA` and only BC decides.

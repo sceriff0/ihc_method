@@ -11,89 +11,113 @@ editor_options:
 suppressPackageStartupMessages({
   library(tidyverse)
   library(here)
+  library(sf)
 })
 
 knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE,
                       fig.width = 9, fig.height = 6)
 
-# Loaders (dds, clinical_data, neoplastic_data, counts_data, ihc_data, ihc_annot)
-# and the shared validation helpers. test.R prints colnames() on load; silence it.
+# Loaders (dds, clinical_data, neoplastic_data, counts_data, ihc_data) and the
+# shared validation helpers. test.R prints colnames() on load; silence it.
 invisible(capture.output(suppressMessages(source(here("code", "test.R")))))
 source(here("code", "validation_helpers.R"))
 ```
 
 ## Starting data and notation
 
-Every value below is derived from four inputs:
+Every value below is derived from three inputs:
 
-- `ihc_annot` — FlowPath single cells, one row per cell **per annotation** file
-  `<patient>_a<k>.csv`. Carries `Out_of_annotation` (precomputed for
-  `ANNOTATION_k`), `phenotype`, per-marker `<marker>_sign`, and `patient_id`.
-- `ihc_data` — the same cells deduplicated to **one copy per patient** (lowest-index
-  file), for whole-slide metrics.
+- `ihc_data` — FlowPath single cells, **one csv per patient** (`<patient>.csv`), one
+  row per cell. Carries `phenotype`, per-marker `<marker>_sign`, `centroid_x`/`y`,
+  `patient_id`, and (optionally) an `Out_of_annotation` flag used only as a
+  membership fallback.
 - `neoplastic_data` — pathologist tumour-content percentage per annotation,
   `ANNOTATION_1..3`.
 - `clinical_data` — the clinical CRF (`HOT score`, `Immuno-phenotype`, blood counts,
   `RESPONSE`, `OS`/`PFS`).
 
-Notation used throughout. For patient $p$ and annotation $k$:
+Membership (which cells count as "inside the tumour annotation"):
 
-$$
-\mathrm{in}_k(c)=\lnot\,\texttt{Out\_of\_annotation}(c)\quad\text{in file }\langle p\rangle\_a k,\qquad
-I_{p,k}=\{c:\mathrm{in}_k(c)\},\qquad
-I_p^{\cup}=\{c:\exists k,\ \mathrm{in}_k(c)\}.
-$$
+```
+PRIMARY (patient HAS a geojson):
+  cell is INSIDE  = its centroid falls in the pathologist geojson polygon
+                    (sf point-in-polygon), with centroids mapped to the geojson
+                    pixel frame by  x_px = centroid_x / 0.325  (0.325 microns/pixel)
+  per annotation  = inside one polygon (ANNOTATION_k)
+  union           = inside the dissolved union of the patient's polygons
 
-A cell $c$ is a **tumour** cell iff its `phenotype_clean` (the text inside the
-parentheses of `phenotype`) contains `"Tumor"`; it is **CD45+** iff
-`CD45_sign` $\in\{+,\text{pos},\text{positive},\text{yes},\text{true},1\}$
-(`is_pos`). `slide_key()` maps every id to the shared numeric slide space
-(strip non-digits, apply the verified typo fix `15879`$\to$`15897`).
+FALLBACK (patient has NO geojson):
+  cell is INSIDE = Out_of_annotation is FALSE   (a single flag, one row labelled "csv")
+```
+
+The `source` column on every row records which was used (`sf` or `csv`).
+
+Cell labels:
+
+```
+tumour cell = phenotype_clean contains "Tumor"
+              (phenotype_clean = the text inside the parentheses of `phenotype`)
+CD45+ cell  = CD45_sign is "+"  (is_pos accepts +, pos, positive, yes, true, 1)
+lineage(cell) = phenotype_clean collapsed via the phenotype_lineage table
+```
+
+`slide_key()` maps every id to the shared numeric slide space (strip non-digits,
+apply the verified typo fix `15879` -> `15897`).
 
 ## Membership counts
 
-For a cell set $S$ (either $I_{p,k}$ or $I_p^{\cup}$), `region_ratios(S)` returns:
+For a set of cells (either one annotation's inside cells or the union inside
+cells), `region_ratios()` returns:
 
-$$
-\begin{aligned}
-n_\text{inside}&=|S|, &
-n_\text{tumor}&=|\{c\in S:\text{tumour}(c)\}|, &
-n_\text{cd45}&=|\{c\in S:\text{CD45+}(c)\}|,\\
-n_\ell&=|\{c\in S:\text{lineage}(c)=\ell\}|, &
-\text{tumor\_over\_inside}&=\tfrac{n_\text{tumor}}{n_\text{inside}}, &
-\text{cd45\_over\_inside}&=\tfrac{n_\text{cd45}}{n_\text{inside}},
-\end{aligned}
-$$
+```
+n_inside        = number of cells in the set
+n_tumor_inside  = tumour cells in the set
+n_cd45_inside   = CD45+ cells in the set
+n_<lineage>     = cells in the set with that lineage
+                  (lineage in: CD8T, CD4T, Treg, NK, Immune_other, Stroma)
 
-with `frac_`$\ell = n_\ell / n_\text{inside}$ for
-$\ell\in\{$CD8T, CD4T, Treg, NK, Immune\_other, Stroma$\}$. Any ratio with a zero
-denominator is `NA`. `lineage(c)` is `phenotype_clean` collapsed via the
-`phenotype_lineage` table.
+tumor_over_inside = n_tumor_inside / n_inside
+cd45_over_inside  = n_cd45_inside  / n_inside
+frac_<lineage>    = n_<lineage>    / n_inside
+```
+
+Any fraction with a zero denominator is `NA`.
 
 ```{r annotations}
-neo_ids <- slide_key(neoplastic_data$SAMPLE)
-ihc_ids <- unique(slide_key(ihc_annot$patient_id))
-cat("patients with both IHC cells and a pathologist score:",
-    length(intersect(neo_ids, ihc_ids)), "\n")
+# Pathologist geojson polygons (primary membership source).
+annots <- load_annotations(patient_ids = neoplastic_data$SAMPLE)
+
+neo_ids      <- slide_key(neoplastic_data$SAMPLE)
+ihc_ids      <- unique(slide_key(ihc_data$patient_id))
+have_geojson <- unique(slide_key(annots$patient_id))
+missing      <- setdiff(neo_ids, ihc_ids)            # no FlowPath csv at all
+csv_only     <- setdiff(intersect(neo_ids, ihc_ids), have_geojson)  # cells but no geojson
+
+cat("FlowPath patients loaded:", length(ihc_ids),
+    "[", paste(sort(ihc_ids), collapse = ", "), "]\n")
+cat("patients with a pathologist score AND IHC cells:",
+    length(intersect(neo_ids, ihc_ids)),
+    "| via sf geojson:", length(intersect(intersect(neo_ids, ihc_ids), have_geojson)),
+    "| via CSV fallback:", length(csv_only), "\n")
+if (length(missing))
+  cat("pathologist patients with NO FlowPath csv (absent from every IHC metric):",
+      paste(sort(missing), collapse = ", "), "\n")
 ```
 
 ## Tumour content — IHC vs pathologist
 
-Per-annotation IHC value, for each $(p,k)$:
-
-$$
-\text{IHC}_{p,k}=\text{tumor\_over\_inside}(I_{p,k})
-=\frac{|\{c\in I_{p,k}:\text{tumour}(c)\}|}{|I_{p,k}|}.
-$$
-
-Union IHC value: $\text{IHC}_p^{\cup}=\text{tumor\_over\_inside}(I_p^{\cup})$.
-Pathologist reference: $\text{path\_frac}_{p,k}=\texttt{ANNOTATION\_}k/100$; the
-union reference is the per-patient mean $\overline{\text{path\_frac}}_p$ over the
-non-missing annotations.
+```
+IHC (per annotation k) = tumor_over_inside of file <patient>_a<k>.csv's inside cells
+IHC (union)            = tumor_over_inside of the union inside cells
+pathologist (per ann)  = ANNOTATION_k / 100
+pathologist (union)    = mean of that patient's ANNOTATION_k / 100 values
+```
 
 ```{r tumor-content}
-ihc_tumor_per_ann <- ihc_annotation_metrics(ihc_annot, scope = "per_annotation")
-ihc_tumor_union   <- ihc_annotation_metrics(ihc_annot, scope = "union")
+# PRIMARY = sf point-in-polygon on the geojson (fixed /0.325); CSV Out_of_annotation
+# flag only for patients with no geojson.
+ihc_tumor_per_ann <- ihc_annotation_metrics(ihc_data, annots, scope = "per_annotation")
+ihc_tumor_union   <- ihc_annotation_metrics(ihc_data, annots, scope = "union")
 
 path_long <- neoplastic_data |>
   mutate(patient_id = slide_key(SAMPLE)) |>
@@ -121,10 +145,13 @@ ihc_tumor_union |>
   knitr::kable(digits = 3, caption = "Cells inside each patient's tumour region (union).")
 ```
 
-**Concordance statistic.** For paired vectors $x$ (IHC) and $y$ (pathologist) over
-the $n$ complete pairs, `paired_spearman` reports Spearman’s
-$\rho=1-\dfrac{6\sum d_i^2}{n(n^2-1)}$ on the ranks (via `cor.test(method="spearman")`),
-its p-value, and $n$; it returns `NA` when $n<3$ or either vector is constant.
+**Concordance statistic.** `paired_spearman(x, y)` = Spearman rank correlation
+between the two vectors across the shared patients, plus its p-value and the pair
+count `n`. It is `NA` when `n < 3` or either vector is constant.
+
+```
+concordance = Spearman correlation( IHC , pathologist )   across patients
+```
 
 ```{r tumor-content-plot}
 plot_concordance <- function(df, subtitle) {
@@ -146,13 +173,16 @@ if (nrow(cc_ann)   > 0) print(plot_concordance(cc_ann,   "per annotation"))
 if (nrow(cc_union) > 0) print(plot_concordance(cc_union, "union of a patient's annotations"))
 ```
 
-**Bland–Altman (union).** Per patient, with $m=\tfrac{\text{IHC}_p^{\cup}+\overline{\text{path\_frac}}_p}{2}$
-and $d=\text{IHC}_p^{\cup}-\overline{\text{path\_frac}}_p$:
+**Bland–Altman (union).** Per patient:
 
-$$
-\text{bias}=\overline{d},\qquad \text{LoA}=1.96\,\operatorname{sd}(d),\qquad
-\text{limits}=\text{bias}\pm\text{LoA}.
-$$
+```
+mean = (IHC + pathologist) / 2
+diff = IHC - pathologist
+
+bias   = average of diff over patients
+LoA    = 1.96 * standard deviation of diff
+limits = bias plus/minus LoA
+```
 
 ```{r tumor-content-bland-altman}
 if (nrow(cc_union) > 2) {
@@ -173,9 +203,13 @@ if (nrow(cc_union) > 2) {
 
 ## Immune infiltrate — IHC vs clinical immune phenotype
 
-Union-region infiltrate values per patient:
-$\text{cd45\_over\_inside}(I_p^{\cup})$ and `frac_`$\ell(I_p^{\cup})$ for
-$\ell\in\{$CD8T, CD4T, Treg, NK$\}$ (formulas as in *Membership counts*).
+Per patient, over the **union** inside cells:
+
+```
+cd45_over_inside = n_cd45_inside / n_inside
+frac_<lineage>   = n_<lineage>   / n_inside     (lineage in CD8T, CD4T, Treg, NK)
+```
+
 Clinical references: `HOT score` (continuous) and `Immuno-phenotype` (categorical),
 joined on `slide_key(`ID PATIENT`)`.
 
@@ -193,7 +227,7 @@ infiltrate <- ihc_tumor_union |>
 cat("patients with IHC infiltrate + clinical immune phenotype:", nrow(infiltrate), "\n")
 ```
 
-Statistic: Spearman $\rho$ between $\text{cd45\_over\_inside}$ and numeric `HOT score`.
+Statistic: Spearman correlation between `cd45_over_inside` and the numeric `HOT score`.
 
 ```{r infiltrate-hotscore}
 if ("hot_score" %in% names(infiltrate) &&
@@ -212,8 +246,8 @@ if ("hot_score" %in% names(infiltrate) &&
 }
 ```
 
-Grouped by `Immuno-phenotype` (ordered cold $\to$ intermediate $\to$ hot); each
-box is the distribution of the IHC fraction within a phenotype group.
+Grouped by `Immuno-phenotype` (ordered cold -> intermediate -> hot); each box is
+the distribution of the IHC fraction within a phenotype group.
 
 ```{r infiltrate-phenotype}
 if ("immuno_phe" %in% names(infiltrate) &&
@@ -238,15 +272,13 @@ if ("immuno_phe" %in% names(infiltrate) &&
 
 ### Composition under three denominators
 
-Same lineage counts $n_\ell(I_p^{\cup})$, three denominators:
+Same lineage counts, three denominators (each `NA` when its denominator is 0):
 
-$$
-\text{frac\_inside}=\frac{n_\ell}{n_\text{inside}},\qquad
-\text{frac\_tumor}=\frac{n_\ell}{n_\text{tumor}},\qquad
-\text{frac\_cd45}=\frac{n_\ell}{n_\text{cd45}},
-$$
-
-each `NA` when its denominator is $0$ (`region_composition`).
+```
+frac_inside = n_<lineage> / n_inside         (of all cells inside)
+frac_tumor  = n_<lineage> / n_tumor_inside   (of tumour cells inside)
+frac_cd45   = n_<lineage> / n_cd45_inside    (of CD45+ cells inside)
+```
 
 ```{r infiltrate-composition, fig.height=5}
 comp <- region_composition(ihc_tumor_union) |>
@@ -273,20 +305,17 @@ if (nrow(comp) > 0) {
 
 ## Biological-validity QC — whole-slide IHC immune readout vs clinical table
 
-These use `ihc_data` (whole slide, every imaged patient — no annotation).
+These use `ihc_data` (whole slide, every imaged patient — no annotation). Per
+patient p, over all of that patient's cells:
 
-Per-patient whole-slide quantities:
+```
+lineage fraction:  frac(p, lineage) = (cells of p with that lineage) / (all cells of p)
+                                       [ihc_lineage_fraction]
 
-$$
-\text{lineage frac: } \text{frac}_{p,\ell}=\frac{|\{c\in C_p:\text{lineage}(c)=\ell\}|}{|C_p|}
-\quad(\texttt{ihc\_lineage\_fraction}),
-$$
-$$
-\text{marker pos-frac: } \texttt{<marker>\_posfrac}_p=\frac{1}{|C_p|}\sum_{c\in C_p}\mathbf{1}[\text{is\_pos}(\texttt{<marker>\_sign}(c))]
-\quad(\texttt{ihc\_marker\_fraction}),
-$$
-
-where $C_p$ is all cells of patient $p$ in `ihc_data`.
+marker pos-fraction: <marker>_posfrac(p) =
+     (cells of p positive for <marker>) / (cells of p with a non-NA <marker>_sign)
+                                       [ihc_marker_fraction; na.rm]
+```
 
 ```{r whole-slide-immune}
 ihc_lin <- ihc_lineage_fraction(ihc_data) |>
@@ -312,10 +341,12 @@ ihc_clin$ihc_immune_score <- if (!is.na(score_col)) ihc_clin[[score_col]] else N
 
 ### Tissue vs peripheral-blood immunity
 
-$$
-\text{NLR}_p=\frac{\texttt{BASAL VALUE OF NEUTROPHILS}}{\texttt{BASAL VALUE OF LYMPHOCYTES}},
-$$
-compared against `ihc_immune_score` by Spearman $\rho$ (also for lymphocytes and PNI).
+```
+NLR(p) = BASAL VALUE OF NEUTROPHILS / BASAL VALUE OF LYMPHOCYTES
+```
+
+compared against `ihc_immune_score` by Spearman correlation (also for lymphocytes
+and PNI).
 
 ```{r blood-immunity}
 blood <- ihc_clin |>
@@ -373,11 +404,14 @@ if ("RESPONSE" %in% names(ihc_clin)) {
 
 ### Survival
 
-Median split $g_p=\mathbf{1}[\text{ihc\_immune\_score}_p\ge\operatorname{median}]$ →
-Kaplan–Meier per group. Univariable Cox on the continuous score gives the hazard
-ratio $\text{HR}=e^{\hat\beta}$ (`coxph`). Event coding: `coerce_event` maps
-yes/dead/relapse/1 → 1 and no/alive/censored/0 → 0. Time = `OS`/`PFS` (months),
-event = `FOLLOW UP` (death) / `PERSISTENCE OR RELAPSE?` (progression).
+```
+group(p) = "high" if ihc_immune_score(p) >= median, else "low"   -> Kaplan-Meier
+HR       = exp( Cox coefficient of ihc_immune_score )            (univariable coxph)
+```
+
+Event coding (`coerce_event`): yes/dead/relapse/1 -> 1; no/alive/censored/0 -> 0.
+Time = `OS`/`PFS` (months); event = `FOLLOW UP` (death) / `PERSISTENCE OR RELAPSE?`
+(progression).
 
 ```{r survival}
 surv_cfg <- list(
@@ -435,8 +469,10 @@ invisible(purrr::iwalk(surv_cfg, ~ run_survival(.x, .y)))
 
 ## Notes
 
-- Membership is the FlowPath `Out_of_annotation` flag: a cell is inside
-  `ANNOTATION_k` iff `!Out_of_annotation` in file `<patient>_a<k>.csv`; the union is
-  inside if inside in any file. No point-in-polygon.
-- Cohorts are small; every correlation is Spearman with its $n$ reported.
-  Read associations as descriptive.
+- Membership is **sf point-in-polygon** on the pathologist geojson (centroids
+  mapped to the pixel frame by `/0.325`); the FlowPath `Out_of_annotation` flag is
+  used only for patients with no geojson. The `source` column marks which per row.
+- Whole-slide marker fractions use `na.rm`, so the real denominator is the count of
+  cells with a non-`NA` sign, not necessarily every cell of the patient.
+- Cohorts are small; every correlation is Spearman with its `n` reported. Read
+  associations as descriptive.

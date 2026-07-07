@@ -35,34 +35,41 @@ source(here("code", "validation_helpers.R"))
 Every value below is derived from two inputs, bridged by the clinical table:
 
 - `ihc_data` — FlowPath single cells deduplicated to **one copy per patient**
-  (whole slide, no annotation boundary). $C_p$ is the set of all cells of patient
-  $p$; $\text{lineage}(c)$ is `phenotype_clean` collapsed via the `phenotype_lineage`
-  table.
+  (whole slide, no annotation boundary). Each cell carries a `lineage` =
+  `phenotype_clean` collapsed via the `phenotype_lineage` table.
 - `counts_data` — DESeq2-normalized bulk RNA, one row per sample, one column per
   gene, keyed by `Sample` (a CRF id).
-- `clinical_data` — supplies the CRF$\leftrightarrow$slide id bridge.
+- `clinical_data` — supplies the CRF <-> slide id bridge.
 
 Id spaces and the bridge. Bulk RNA lives in **CRF-id** space; IHC lives in
 **slide-id** space. `slide_key()` maps any id to the shared numeric slide space
-(strip non-digits, apply the verified typo fix `15879`$\to$`15897`). `norm_id()`
+(strip non-digits, apply the verified typo fix `15879` -> `15897`). `norm_id()`
 upper-cases and strips non-alphanumerics. `crf_to_slide_map(clinical_data)` returns
-a named vector $\texttt{crf2slide}[\,\text{crf}\,]=\text{slide}$, built from
-`norm_id(`ID CRF PRESERVE`)`$\to$`slide_key(`ID PATIENT`)`.
+a named vector `crf2slide`:
 
-Comparison is anchored to $\mathcal{L}=\{$CD8T, CD4T, Treg, NK$\}$
+```
+crf2slide[crf] = slide
+where: crf   = norm_id of `ID CRF PRESERVE`
+       slide = slide_key of `ID PATIENT`
+```
+
+Comparison is anchored to the four comparable lineages CD8T, CD4T, Treg, NK
 (`comparable_lineages`) — the only IHC phenotype lineages with a clean
 deconvolution counterpart. `deconv_to_lineage()` maps each method's cell-type
-string to an $\ell\in\mathcal{L}$ (case-insensitive pattern match:
-`regulatory|treg`$\to$Treg, `cd8`$\to$CD8T, `cd4`$\to$CD4T,
-`^nk|nk cell|natural killer`$\to$NK), everything else to `NA`. All correlations
-are Spearman $\rho$ via `paired_spearman` (rank-based; `NA` when $n<3$ shared
-patients or either vector is constant).
+string to one of these (case-insensitive pattern match: `regulatory|treg` ->
+Treg, `cd8` -> CD8T, `cd4` -> CD4T, `^nk|nk cell|natural killer` -> NK),
+everything else to `NA`. All correlations are Spearman correlation via
+`paired_spearman` (rank-based; `NA` when fewer than 3 shared patients or either
+vector is constant).
 
 ## Bulk-RNA expression matrix
 
-$\texttt{expr\_mat}$ is `counts_data` (sample $\times$ gene) transposed to
-gene $\times$ sample, cast double, with gene symbols as row names:
-$\texttt{expr\_mat}[g,s]=\texttt{counts\_data}[s,g]$.
+`expr_mat` is `counts_data` (sample by gene) transposed to gene by sample, cast
+double, with gene symbols as row names:
+
+```
+expr_mat[gene, sample] = counts_data[sample, gene]   (transpose)
+```
 
 ```{r expr-matrix}
 expr_mat <- counts_data |>
@@ -85,7 +92,7 @@ Each method is gated by the inputs it needs, not preference:
 - `methods_free` (quanTIseq, EPIC, MCPcounter, xCell, ABIS) — run on `expr_mat`
   alone. Always enabled.
 - `methods_indication` (TIMER, ConsensusTME) — need one cancer-type code per
-  sample (`INDICATIONS`, length $=$ `ncol(expr_mat)`). Enabled iff `INDICATIONS`
+  sample (`INDICATIONS`, length = `ncol(expr_mat)`). Enabled iff `INDICATIONS`
   is non-`NULL`; here it is `NULL`, so both are skipped.
 - CIBERSORT / CIBERSORT (abs.) — license-gated `CIBERSORT.R` + `LM22.txt`, paths
   from env vars `CIBERSORT_BINARY` / `CIBERSORT_MAT`. Run iff both are set and the
@@ -116,12 +123,17 @@ SC_REFERENCE <- here("data", "sc_reference.rds")
 
 ## Run deconvolution methods
 
-Each enabled method $m$ produces a cell-type $\times$ sample score table,
-pivoted long to rows $(\text{cell\_type}, \text{sample}, \text{score}, m)$. Then
-$\text{crf\_id}=\texttt{norm\_id}(\text{sample})$,
-$\text{patient\_id}=\texttt{crf2slide}[\text{crf\_id}]$ (slide space), and
-$\text{lineage}=\texttt{deconv\_to\_lineage}(\text{cell\_type})$. Rows with no
-slide crosswalk (`patient_id` is `NA`) are dropped.
+Each enabled method produces a cell-type by sample score table, pivoted long to
+rows of (cell_type, sample, score, method). Then each row is keyed into slide
+space:
+
+```
+crf_id     = norm_id(sample)
+patient_id = crf2slide[crf_id]              (slide space)
+lineage    = deconv_to_lineage(cell_type)
+```
+
+Rows with no slide crosswalk (`patient_id` is `NA`) are dropped.
 
 ```{r deconvolve}
 # Bulk RNA samples are in CRF-id space; IHC is slide-id space. Bridge via clinical
@@ -129,45 +141,66 @@ slide crosswalk (`patient_id` is `NA`) are dropped.
 crf2slide <- crf_to_slide_map(clinical_data)
 
 deconv_long <- NULL
+deconv_status <- NULL
 if (requireNamespace("immunedeconv", quietly = TRUE)) {
-  # indication-aware wrapper: TIMER/ConsensusTME need `indications`, the rest don't.
-  safe_deconv <- purrr::possibly(function(m) {
-    args <- list(gene_expression = expr_mat, method = m)
-    if (m %in% c("timer", "consensus_tme")) args$indications <- INDICATIONS
-    do.call(immunedeconv::deconvolute, args) |>
-      pivot_longer(-cell_type, names_to = "sample", values_to = "score") |>
-      mutate(method = m)
-  }, otherwise = NULL, quiet = FALSE)
+  # Run one method, CAPTURING success/failure + a note (why it failed, or how many
+  # cell types it returned). possibly()'s messages are hidden by message=FALSE, so
+  # failures were previously invisible — this makes "only 3 methods ran" diagnosable.
+  run_method <- function(m) {
+    tryCatch({
+      args <- list(gene_expression = expr_mat, method = m)
+      if (m %in% c("timer", "consensus_tme")) args$indications <- INDICATIONS
+      res <- do.call(immunedeconv::deconvolute, args) |>
+        pivot_longer(-cell_type, names_to = "sample", values_to = "score") |>
+        mutate(method = m)
+      list(method = m, ok = TRUE, data = res,
+           note = sprintf("%d cell types", dplyr::n_distinct(res$cell_type)))
+    }, error = function(e) list(method = m, ok = FALSE, data = NULL,
+                                note = conditionMessage(e)))
+  }
 
-  parts <- purrr::map(c(methods_free, methods_indication), safe_deconv)
-
+  methods_run <- c(methods_free, methods_indication)
   # CIBERSORT (+ abs): only when the license-gated files are configured & present.
   if (!is.na(CIBERSORT_BINARY) && !is.na(CIBERSORT_MAT) &&
       file.exists(CIBERSORT_BINARY) && file.exists(CIBERSORT_MAT)) {
     immunedeconv::set_cibersort_binary(CIBERSORT_BINARY)
     immunedeconv::set_cibersort_mat(CIBERSORT_MAT)
-    parts <- c(parts, purrr::map(c("cibersort", "cibersort_abs"), safe_deconv))
-  } else {
-    message("CIBERSORT skipped — set CIBERSORT_BINARY + CIBERSORT_MAT (LM22.txt) to enable.")
+    methods_run <- c(methods_run, "cibersort", "cibersort_abs")
   }
 
-  deconv_long <- parts |>
-    purrr::compact() |>
-    bind_rows() |>
-    mutate(crf_id     = norm_id(sample),
-           patient_id = unname(crf2slide[crf_id]),   # crf id -> slide id
-           lineage    = deconv_to_lineage(cell_type))
+  runs <- purrr::map(methods_run, run_method)
+  deconv_status <- purrr::map_dfr(runs, function(r)
+    tibble::tibble(method = r$method,
+                   status = if (r$ok) "ok" else "FAILED",
+                   detail = r$note))
 
-  n_unmapped  <- dplyr::n_distinct(deconv_long$crf_id[is.na(deconv_long$patient_id)])
-  deconv_long <- deconv_long |> filter(!is.na(patient_id))
+  ok_data <- runs |> purrr::keep(~ .x$ok) |> purrr::map("data")
+  if (length(ok_data)) {
+    deconv_long <- bind_rows(ok_data) |>
+      mutate(crf_id     = norm_id(sample),
+             patient_id = unname(crf2slide[crf_id]),   # crf id -> slide id
+             lineage    = deconv_to_lineage(cell_type))
+    n_unmapped  <- dplyr::n_distinct(deconv_long$crf_id[is.na(deconv_long$patient_id)])
+    deconv_long <- deconv_long |> filter(!is.na(patient_id))
+  } else {
+    n_unmapped <- 0L
+  }
 
-  cat("deconvolution rows:", nrow(deconv_long),
-      "across", dplyr::n_distinct(deconv_long$method), "method(s):",
-      paste(sort(unique(deconv_long$method)), collapse = ", "), "\n",
-      n_unmapped, "RNA sample(s) had no slide crosswalk\n")
+  cat("methods:", sum(deconv_status$status == "ok"), "ok of",
+      nrow(deconv_status), "attempted [",
+      paste(sort(unique(deconv_long$method)), collapse = ", "), "]",
+      "| deconvolution rows:", if (is.null(deconv_long)) 0L else nrow(deconv_long),
+      "|", n_unmapped, "RNA sample(s) had no slide crosswalk\n")
 } else {
   message("immunedeconv not installed — install it to run this report.")
 }
+```
+
+```{r deconv-status, echo=FALSE}
+if (!is.null(deconv_status))
+  knitr::kable(deconv_status,
+    caption = paste("Deconvolution method run status. A FAILED row is why that",
+                    "method is absent downstream; the `detail` is its error message."))
 ```
 
 ## BayesPrism (single-cell reference; scaffolded)
@@ -176,12 +209,12 @@ if (requireNamespace("immunedeconv", quietly = TRUE)) {
 second-generation method (fractions from a cell-type-annotated scRNA-seq
 reference, via `omnideconv`); this project ships no reference, so the block is a
 ready-to-run scaffold that activates only when `data/sc_reference.rds` is present
-(an `.rds` list: `counts` = gene$\times$cell, `labels` = per-cell type, `batch` =
+(an `.rds` list: `counts` = gene by cell, `labels` = per-cell type, `batch` =
 per-cell sample id) and skips cleanly otherwise. Its output is mapped to
-$(\text{patient\_id}, \text{lineage})$ by the same
-$\texttt{norm\_id}\to\texttt{crf2slide}$ / `deconv_to_lineage` pipeline as the
-other methods, then row-bound into `deconv_long`. Verify the `omnideconv`
-argument names against your installed version before trusting the numbers.
+(patient_id, lineage) by the same `norm_id` -> `crf2slide` / `deconv_to_lineage`
+pipeline as the other methods, then row-bound into `deconv_long`. Verify the
+`omnideconv` argument names against your installed version before trusting the
+numbers.
 
 ```{r bayesprism}
 bayes_long <- NULL
@@ -224,16 +257,18 @@ if (!is.null(bayes_long) && !is.null(deconv_long)) {
 
 ## IHC lineage fractions (reference)
 
-`ihc_lineage_fraction(ihc_data)` counts cells per $(p,\ell)$ and normalises by the
-patient's total cell count (over **all** lineages, `NA` included), giving the
-whole-slide fraction
+`ihc_lineage_fraction(ihc_data)` counts cells per patient and lineage and
+normalises by the patient's total cell count (over **all** lineages, `NA`
+included), giving the whole-slide fraction:
 
-$$
-\text{ihc\_frac}_{p,\ell}=\frac{|\{c\in C_p:\text{lineage}(c)=\ell\}|}{|C_p|}.
-$$
+```
+ihc_frac(patient, lineage) = (cells of patient with that lineage) / (all cells of patient)
+where: the denominator is ALL cells of the patient (every lineage, NA included),
+       before restricting to the four comparable lineages.
+```
 
-Restricted to $\ell\in\mathcal{L}$, then **completed to 0** across the full
-$\{p\}\times\mathcal{L}$ grid: a lineage a patient simply lacks reads as $0$
+Restricted to the four comparable lineages, then **completed to 0** across the
+full patient-by-lineage grid: a lineage a patient simply lacks reads as 0
 (present), not a missing row — otherwise the `inner_join` below would silently
 drop that patient from that lineage's panel.
 
@@ -256,15 +291,17 @@ cat("IHC patients with lineage fractions:", dplyr::n_distinct(ihc_lin$patient_id
 
 ## Method vs IHC — per-lineage concordance
 
-Per-$(m,p,\ell)$ score sums a method's sub-types mapping to the same lineage
-(e.g. two NK sub-types):
+Per method, patient and lineage, the score sums a method's sub-types mapping to
+the same lineage (e.g. two NK sub-types):
 
-$$
-\text{score}_{m,p,\ell}=\sum_{\substack{\text{rows of }m\text{ for }p\\ \texttt{deconv\_to\_lineage}(\text{cell\_type})=\ell}} \text{score}.
-$$
+```
+score(method, patient, lineage) = sum of that method's sub-type scores mapping to the lineage
+where: the sub-types are the method's rows for that patient whose
+       deconv_to_lineage(cell_type) equals the lineage.
+```
 
-This is inner-joined to $\text{ihc\_frac}_{p,\ell}$ on $(p,\ell)$, keeping finite
-pairs.
+This is inner-joined to `ihc_frac(patient, lineage)` on patient and lineage,
+keeping finite pairs.
 
 ```{r concordance}
 paired <- NULL
@@ -281,11 +318,15 @@ if (!is.null(deconv_long) && nrow(deconv_long) > 0) {
 }
 ```
 
-Per $(m,\ell)$, concordance is the cross-patient Spearman
-$\rho_{m,\ell}=\texttt{paired\_spearman}(\text{score}_{m,\cdot,\ell},\ \text{ihc\_frac}_{\cdot,\ell})$.
-Method ranking is the mean over lineages,
-$\overline{\rho}_m=\operatorname{mean}_{\ell}\rho_{m,\ell}$ (`na.rm`), with
-$n_\ell=\#\{\ell:\rho_{m,\ell}\text{ finite}\}$.
+Per method and lineage, concordance is the cross-patient Spearman correlation
+between the method's score and the IHC fraction; method ranking averages those
+across lineages:
+
+```
+concordance(method, lineage) = Spearman correlation between score and ihc_frac across patients
+method ranking(method)       = average of those Spearman values across lineages (na.rm)
+where: n_lineages = the number of lineages with a finite Spearman value.
+```
 
 ```{r concordance-table}
 if (!is.null(paired) && nrow(paired) > 0) {
@@ -308,8 +349,7 @@ if (!is.null(paired) && nrow(paired) > 0) {
 }
 ```
 
-Scatter of $\text{ihc\_frac}$ ($x$) vs $\text{score}$ ($y$), faceted method
-$\times$ lineage.
+Scatter of `ihc_frac` (x) vs `score` (y), faceted method by lineage.
 
 ```{r concordance-plot}
 if (!is.null(paired) && nrow(paired) > 0) {
@@ -325,9 +365,9 @@ if (!is.null(paired) && nrow(paired) > 0) {
 
 ## Cross-method agreement (methods vs each other and vs IHC)
 
-Treat IHC as one more "source" alongside each method, giving one value per
-$(\text{source}, p, \ell)$: the per-lineage deconvolution score for a method, or
-$\text{ihc\_frac}$ for source `IHC`.
+Treat IHC as one more "source" alongside each method, giving one value per source,
+patient and lineage: the per-lineage deconvolution score for a method, or
+`ihc_frac` for source `IHC`.
 
 ```{r agreement}
 agr <- NULL
@@ -347,20 +387,20 @@ if (!is.null(deconv_long) && nrow(deconv_long) > 0) {
 ```
 
 `pairwise_agreement` returns a symmetric long table over every ordered source
-pair $(a,b)$. For $a=b$ the entry is fixed at $\text{mean\_rho}=1$
-($\text{n\_lineages}=$ `NA`). For $a\neq b$ it inner-joins the two sources on
-$(p,\ell)$ (their shared patients), computes a per-lineage Spearman
-$\rho_\ell=\texttt{paired\_spearman}(\text{value}_a,\text{value}_b)$ across those
-shared patients, then averages:
+pair (a, b):
 
-$$
-\text{mean\_rho}(a,b)=\operatorname{mean}_{\ell}\rho_\ell\ (\text{na.rm}),\qquad
-\text{n\_lineages}(a,b)=\#\{\ell:\rho_\ell\text{ finite}\}.
-$$
+```
+pairwise_agreement(a, b):
+  if a == b:             mean_rho = 1,   n_lineages = NA
+  if no shared patients: mean_rho = NA,  n_lineages = 0
+  otherwise:             mean_rho   = average across lineages of the per-lineage
+                                      Spearman between a and b over their shared patients
+                         n_lineages = the number of lineages with a finite Spearman value
+where: for each lineage, the per-lineage Spearman correlates a's value against
+       b's value across the patients the two sources share.
+```
 
-If the join is empty (no shared patients) the entry is $\text{mean\_rho}=$ `NA`,
-$\text{n\_lineages}=0$. Rank-based throughout, so the methods' differing score
-scales do not matter.
+Rank-based throughout, so the methods' differing score scales do not matter.
 
 ```{r agreement-heatmap, fig.height=6}
 if (!is.null(agr) && nrow(agr) > 0) {
@@ -390,10 +430,16 @@ if (!is.null(agr) && nrow(agr) > 0) {
 }
 ```
 
-Per source $a$: $\text{mean\_rho\_vs\_others}=\operatorname{mean}_{b\neq a}\text{mean\_rho}(a,b)$
-(agreement with the consensus of the others) and $\text{rho\_vs\_IHC}=\text{mean\_rho}(a,\text{IHC})$
-(agreement with IHC alone). A high vs-others but low vs-IHC source (or the reverse)
-localises where methods and IHC diverge.
+Per source:
+
+```
+mean_rho_vs_others(a) = average of mean_rho(a, b) over all other sources b
+rho_vs_IHC(a)         = mean_rho(a, IHC)
+```
+
+`mean_rho_vs_others` is agreement with the consensus of the others; `rho_vs_IHC`
+is agreement with IHC alone. A high vs-others but low vs-IHC source (or the
+reverse) localises where methods and IHC diverge.
 
 ```{r agreement-ranks}
 if (!is.null(agr) && nrow(agr) > 0) {
@@ -417,13 +463,13 @@ if (!is.null(agr) && nrow(agr) > 0) {
   slope against IHC is not meaningful, so every statistic here is Spearman.
   Absolute-fraction methods (quanTIseq, EPIC, CIBERSORT abs., ABIS) are the fair
   apples-to-apples comparison but are still compared by rank for uniformity.
-- Only $\mathcal{L}=\{$CD8T, CD4T, Treg, NK$\}$ are compared: the IHC panel has no
-  macrophage or B-cell phenotype, so `deconv_to_lineage` returns `NA` for those
-  and they are dropped (`bulkRna.Rmd` does a marker-level CD163/CD14 check
-  instead).
-- Cross-patient Spearman needs $\ge 3$ shared patients (and non-constant vectors);
-  sparser $(m,\ell)$ or source pairs return `NA` rather than a spurious
-  correlation, and `mean_rho`/`mean_rho` averages over the finite lineages only.
+- Only the four comparable lineages CD8T, CD4T, Treg, NK are compared: the IHC
+  panel has no macrophage or B-cell phenotype, so `deconv_to_lineage` returns `NA`
+  for those and they are dropped (`bulkRna.Rmd` does a marker-level CD163/CD14
+  check instead).
+- Cross-patient Spearman needs at least 3 shared patients (and non-constant
+  vectors); sparser method-lineage or source pairs return `NA` rather than a
+  spurious correlation, and mean_rho averages over the finite lineages only.
   With this cohort's size the agreement matrix is descriptive — read it for
   *pattern*, not significance.
 - The CIBERSORT and BayesPrism blocks are scaffolds — verify `set_cibersort_*()`

@@ -25,45 +25,46 @@ CAP <- "ihc_method internal QC · lineage leakage & exclusivity"
 ## Starting data and notation
 
 Single input: `ihc_data`, the FlowPath single cells deduplicated to **one copy per
-patient** (whole slide). Let $C_p$ be the cells of patient $p$ and
-$C=\bigcup_p C_p$ the pooled cohort. All patient ids are mapped to slide space by
-`slide_key()` (strip non-digits, apply the typo fix `15879`$\to$`15897`).
+patient** (whole slide). "Patient p's cells" means every row of `ihc_data` for that
+patient; "the cohort" means all cells pooled across patients. All patient ids are
+mapped to slide space by `slide_key()` (strip non-digits, apply the typo fix
+`15879` -> `15897`).
 
-For a marker $m$ carrying a `<m>_sign` column, positivity is
-$$
-m^+(c)=\mathbf{1}\!\left[\texttt{is\_pos}(\texttt{<m>\_sign}(c))\right],\qquad
-\texttt{is\_pos}(v)\iff v\in\{+,\text{pos},\text{positive},\text{yes},\text{true},1\}.
-$$
-`phenotype_clean` (the parenthetical label in `phenotype`) is the per-cell type;
-`lineage(c)` collapses it via `phenotype_lineage`. This report defines its two
-phenotype membership sets directly from `phenotype_clean`, **not** through
-`lineage()`:
-$$
-\text{tumour-ph}(c)\iff \texttt{phenotype\_clean}(c)\ \text{contains}\ \texttt{"Tumor"},\qquad
-\text{immune-ph}(c)\iff \texttt{phenotype\_clean}(c)\in\Phi_\text{imm},
-$$
-with the literal set $\Phi_\text{imm}=\{$`Immune`, `T helper`, `T cytotoxic`,
+Cell labels:
+
+```
+marker+ cell = <marker>_sign is "+"  (is_pos accepts +, pos, positive, yes, true, 1)
+tumour-phenotype cell = phenotype_clean contains "Tumor"
+                        (phenotype_clean = the text inside the parentheses of `phenotype`)
+immune-phenotype cell = phenotype_clean is one of the literal immune labels below
+```
+
+The immune-phenotype labels are: `Immune`, `T helper`, `T cytotoxic`,
 `Activated T cytotoxic`, `CD4+ Treg`, `CD8+ T reg`, `Natural Killer`,
-`Activated Natural Killer`$\}$ (defined in the chunk below; excludes Stroma /
-Unknown / Tumor). Missing `phenotype_clean` is treated as the empty string, so it
-matches neither set.
+`Activated Natural Killer` (defined in the chunk below; excludes Stroma / Unknown /
+Tumor). These two phenotype sets are read directly from `phenotype_clean`, **not**
+through the `lineage()` collapse. Missing `phenotype_clean` is treated as the empty
+string, so it matches neither set.
 
 ## 1. Phenotype-level leakage
 
-Per patient $p$, the fraction of one lineage's phenotyped cells that call the
+Per patient p, the fraction of one lineage's phenotyped cells that call the
 opposite lineage's marker:
-$$
-\text{cd45pos\_in\_tumorph}_p=
-\frac{\bigl|\{c\in C_p:\text{tumour-ph}(c)\ \wedge\ \text{CD45}^+(c)\}\bigr|}
-     {\bigl|\{c\in C_p:\text{tumour-ph}(c)\}\bigr|},
-$$
-$$
-\text{panckpos\_in\_immune}_p=
-\frac{\bigl|\{c\in C_p:\text{immune-ph}(c)\ \wedge\ \text{PANCK}^+(c)\}\bigr|}
-     {\bigl|\{c\in C_p:\text{immune-ph}(c)\}\bigr|},
-$$
-with $n\_\text{cells}_p=|C_p|$. Each ratio is `NA` when its patient has no cell in
-the corresponding phenotype set (`any(...)` guard); positivity is never `NA`.
+
+```
+cd45pos_in_tumorph(p) = (tumour-phenotype cells of p that are CD45+) / (tumour-phenotype cells of p)
+panckpos_in_immune(p) = (immune-phenotype cells of p that are PANCK+) / (immune-phenotype cells of p)
+
+n_cells(p) = all cells of p
+where:
+  tumour-phenotype cell = phenotype_clean contains "Tumor"
+  immune-phenotype cell = phenotype_clean is one of the literal immune labels
+  CD45+  = CD45_sign is "+"
+  PANCK+ = PANCK_sign is "+"
+```
+
+Each ratio is `NA` when its patient has no cell in the corresponding phenotype set
+(`any(...)` guard); positivity is never `NA`.
 
 ```{r leakage}
 immune_ph <- c("Immune", "T helper", "T cytotoxic", "Activated T cytotoxic",
@@ -108,26 +109,29 @@ spill |>
 
 ## 2. Marker-pair exclusivity panel
 
-`sign_pos` is the per-cell positivity matrix: one logical column $m^+$ per marker
-$m\in$`ihc_markers`, obtained by applying `is_pos` to every `<m>_sign` column and
-stripping the `_sign` suffix. Each row is a cell $c\in C$; `patient_id` is
+`sign_pos` is the per-cell positivity matrix: one logical column per marker in
+`ihc_markers`, obtained by applying `is_pos` to every `<marker>_sign` column and
+stripping the `_sign` suffix. Each row is a cell of the cohort; `patient_id` is
 `slide_key`-normalised.
 
-For a candidate pair $(a,b)$ retained only if both columns exist in `sign_pos`,
-all counts are **pooled over the whole cohort** $C$:
-$$
-n_a=\sum_{c\in C}a^+(c),\qquad
-n_b=\sum_{c\in C}b^+(c),\qquad
-n_\text{both}=\sum_{c\in C}a^+(c)\,b^+(c).
-$$
-$$
-\text{pct\_dp\_all}=\frac{n_\text{both}}{|C|},\qquad
-p(b\!\mid\!a)=\frac{n_\text{both}}{n_a},\qquad
-p(a\!\mid\!b)=\frac{n_\text{both}}{n_b},
-$$
-with the two conditionals set to `NA` when their denominator ($n_a$ or $n_b$) is
-$0$. `pct_dp_all` uses the all-cell denominator $|C|$; the conditionals use the
-single-marker denominators.
+For a candidate pair of markers (a, b), retained only if both columns exist in
+`sign_pos`, all counts are **pooled over the whole cohort**:
+
+```
+n_a    = cohort cells that are a+
+n_b    = cohort cells that are b+
+n_both = cohort cells that are both a+ and b+   (double-positive)
+
+pct_dp_all  = n_both / (all cohort cells)
+p(b | a)    = n_both / n_a       (share of a+ cells that are also b+)
+p(a | b)    = n_both / n_b       (share of b+ cells that are also a+)
+where:
+  marker+ cell = <marker>_sign is "+"
+```
+
+The two conditionals are set to `NA` when their denominator (`n_a` or `n_b`) is 0.
+`pct_dp_all` uses the all-cell denominator; the conditionals use the single-marker
+positive counts.
 
 ```{r exclusivity-pairs}
 # Per-cell marker positivity matrix (one logical column per marker).
@@ -168,9 +172,11 @@ knitr::kable(pair_stats, digits = 4,
 ```
 
 Worst-direction co-positivity per pair:
-$$
-\text{max\_cond}=\max\bigl(p(b\!\mid\!a),\,p(a\!\mid\!b)\bigr),
-$$
+
+```
+max_cond = larger of  p(b | a)  and  p(a | b)
+```
+
 plotted for the pairs with a finite value.
 
 ```{r exclusivity-summary, fig.height=4.5}
@@ -190,10 +196,12 @@ pair_stats |>
 
 Per-patient double-positive fraction, one value per (patient, pair), over **all**
 of that patient's cells:
-$$
-\text{dp}_{p,(a,b)}=\frac{1}{|C_p|}\sum_{c\in C_p}a^+(c)\,b^+(c).
-$$
-This denominator is $|C_p|$ (all cells), i.e. the per-patient analogue of
+
+```
+dp(p, a, b) = (cells of p that are both a+ and b+) / (all cells of p)
+```
+
+This denominator is all of patient p's cells, i.e. the per-patient analogue of
 `pct_dp_all`, not of the conditional rates above.
 
 ```{r exclusivity-heatmap}
@@ -228,10 +236,10 @@ phenotype) and CD8/FOXP3 (the `CD8+ T reg` phenotype).
 
 - Single source `ihc_data` (whole slide); every metric is a count ratio, no
   external reference.
-- Denominator audit: leakage rates divide by phenotype-set size within $C_p$;
-  `pct_dp_all` and heatmap `dp` divide by all cells ($|C|$ / $|C_p|$);
-  `p_b_given_a` / `p_a_given_b` divide by the single-marker positive counts
-  ($n_a$ / $n_b$). The conditional rates and pair counts are pooled cohort-wide,
-  whereas leakage and the heatmap are per patient.
-- Leakage membership uses `phenotype_clean` text and the literal $\Phi_\text{imm}$
+- Denominator audit: leakage rates divide by the phenotype-set size within a
+  patient's cells; `pct_dp_all` and heatmap `dp` divide by all cells (whole cohort /
+  the patient); `p_b_given_a` / `p_a_given_b` divide by the single-marker positive
+  counts (`n_a` / `n_b`). The conditional rates and pair counts are pooled
+  cohort-wide, whereas leakage and the heatmap are per patient.
+- Leakage membership uses `phenotype_clean` text and the literal immune-phenotype
   list, not the `phenotype_lineage` collapse.

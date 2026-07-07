@@ -32,39 +32,40 @@ states the raw columns consumed and the exact reduction to the plotted value.
 ## Starting data and notation
 
 The core input is **`data/benchmark/measurements.csv`** — one row per
-$(\text{run}\times\text{process})$. Write $r$ for a run and $s$ for a process
-(`proc`, the `process` string with everything up to the last `:` stripped:
-$\texttt{proc}=\texttt{str\_replace(process, ".*:", "")}$). Per row:
+run-and-process. `proc` is the `process` string with everything up to the last
+`:` stripped. Per row we read three quantities:
 
-$$
-R_{r,s}=\texttt{peak\_rss\_gb}\ \text{(GiB)},\quad
-T_{r,s}=\texttt{realtime\_s}\ \text{(s)},\quad
-x_r=\texttt{input\_gb}\ \text{(GiB)},
-$$
+```
+peak_rss_gb = peak resident memory of that process   (GiB)
+realtime_s  = wall time of that process              (s)
+input_gb    = input size of that run                 (GiB)
+```
 
 plus every swept parameter and the label `varied_axis` naming which knob that run
-varied off baseline. Size-scaling figures keep only
+varied off baseline. Size-scaling figures keep only the runs whose `varied_axis`
+is one of the `size_axes`:
 
-$$
-\texttt{size\_axes}=\{\texttt{baseline},\texttt{scaling\_grid},\texttt{registration\_grid},
-\texttt{distributed\_grid},\texttt{target\_px},\texttt{n\_channels}\}.
-$$
+```
+size_axes = baseline, scaling_grid, registration_grid,
+            distributed_grid, target_px, n_channels
+```
 
-Registration-stage RAM is aggregated over the registration **leaf** processes
+Registration-stage RAM is aggregated over the registration **leaf** processes:
 
-$$
-\texttt{reg\_leaves}=\{\texttt{REGISTER},\texttt{REG\_PREP},\texttt{REG\_TILE},
-\texttt{REG\_NONRIGID},\texttt{REG\_MICRO\_PREP},\texttt{REG\_FINALIZE},\dots\},
-$$
+```
+reg_leaves = REGISTER, REG_PREP, REG_TILE, REG_NONRIGID,
+             REG_MICRO_PREP, REG_FINALIZE, and similar
+```
 
-and boolean sweep flags are read with $\texttt{truthy}(x)=\big[\operatorname{lower}(x)\in\{\texttt{true},1,\texttt{yes}\}\big]$.
+and boolean sweep flags are read as "truthy" when the lower-cased value is one of
+`true`, `1`, or `yes`.
 
 **Optional CSVs** (a figure needing an absent file is skipped): `resource_stats.csv`,
 `quality.csv`, `run_cost.csv`, `segmentation_agreement.csv`,
 `classic_vs_distributed_registration.csv`, `registration_drift.csv`. Accuracy
 columns (`reg_tre_median_px`, `max_abs_delta`, `pct_pixels_diff`,
-`rss_saving_gb`, `peak_rss_gb_mean/std`, `instance_f1`, `cell_count_ratio`) are
-**precomputed upstream** and only read here — see *Notes*.
+`rss_saving_gb`, `peak_rss_gb_mean`/`peak_rss_gb_std`, `instance_f1`,
+`cell_count_ratio`) are **precomputed upstream** and only read here — see *Notes*.
 
 ```{r run-benchmark}
 bench_figs <- list()
@@ -80,71 +81,83 @@ if (have_bench) {
 ## Metrics
 
 Every reduction below lives in `code/benchmark_plots.R`; the cited function/object
-name lets a reader trace raw column $\to$ plotted value.
+name lets a reader trace raw column -> plotted value.
 
 **Power-law scaling** (`01_memory_scaling_per_process`, `02_time_scaling_per_process`;
-`powerlaw` + `powerlaw_plot`). Over rows with `varied_axis` $\in\texttt{size\_axes}$,
-$x_r>0$ and $y>0$, per process $s$ an OLS line is fit in log-log space:
+`powerlaw` + `powerlaw_plot`). Over rows whose `varied_axis` is in `size_axes`,
+with `input_gb` > 0 and y > 0, per process an OLS line is fit in log-log space:
 
-$$
-\log_{10} y \;=\; a_s + \beta_s\,\log_{10} x_r
-\qquad(\texttt{lm(log10(y) \textasciitilde{} log10(input\_gb))}),
-$$
+```
+fit  log10(y) = a + exponent * log10(input_gb)   (OLS)
+report exponent (slope) and R^2
 
-reporting the **scaling exponent** $\beta_s$ (slope) and $R^2_s$
-(`summary(f)$r.squared`); the drawn line is $y=10^{\,a_s+\beta_s\log_{10}x}$ across
-$[\min x,\max x]$. $y=R_{r,s}$ for fig 01, $y=T_{r,s}$ for fig 02.
-Reading: $\beta=1$ linear, $\beta>1$ super-linear, $\beta<1$ sub-linear.
+where:
+- y = peak_rss_gb for fig 01, realtime_s for fig 02
+- the drawn line is  y = 10^(a + exponent * log10(input_gb))
+                     across the min..max of input_gb
+```
+
+Reading: exponent = 1 linear, exponent > 1 super-linear, exponent < 1 sub-linear.
 
 **Classic vs distributed registration RAM** (`03_classic_vs_distributed_ram`,
 `03b_distributed_ram_saving`; from `classic_vs_distributed_registration.csv`).
 Columns `reg_peak_rss_gb_classic` and `reg_peak_rss_gb_distributed` are plotted
 directly vs `target_px`, faceted by `n_channels`. The saving is the precomputed
-column $\texttt{rss\_saving\_gb}=\texttt{classic}-\texttt{distributed}$ (GiB).
+column:
+
+```
+rss_saving_gb = reg_peak_rss_gb_classic - reg_peak_rss_gb_distributed   (GiB)
+```
 
 **N-image registration RAM** (`04_nimage_registration_ram`). `REGISTER` rows on
 `registration_grid`/`baseline`/`scaling_grid`, replicate mean per configuration:
 
-$$
-\overline{R}(\texttt{target\_px},\texttt{n\_channels},\texttt{n\_register\_images})
-=\operatorname{mean}(R_{r,\texttt{REGISTER}}).
-$$
+```
+value = mean of peak_rss_gb over REGISTER runs
+        grouped by (target_px, n_channels, n_register_images)
+```
 
 **OFAT knob effects** (`05_ofat_knob_effects`). For each knob in `knob_targets`
-(an `(axis, proc, metric)` triple), keep rows with `varied_axis` $\in\{\text{axis},
-\texttt{baseline}\}$ and $\texttt{proc}=\text{proc}$, then average the metric
-(`realtime_s`) per distinct knob value: $\overline{T}(\text{value})=\operatorname{mean}(T)$.
+(an `(axis, proc, metric)` triple), keep rows whose `varied_axis` is the knob's
+axis or `baseline` and whose `proc` matches, then average the metric per distinct
+knob value:
+
+```
+value = mean of realtime_s per distinct knob value
+```
 
 **Replicate variance** (`06_replicate_variance`; from `resource_stats.csv`, rows
-with `n_reps` $>1$). Bars are the precomputed `peak_rss_gb_mean`; error bars span
-$\texttt{peak\_rss\_gb\_mean}\pm\texttt{peak\_rss\_gb\_std}$.
+with `n_reps` > 1). Bars are the precomputed `peak_rss_gb_mean`; error bars span
+`peak_rss_gb_mean` minus/plus `peak_rss_gb_std`.
 
 **Stage memory heatmap** (`07_stage_memory_heatmap`). Rows on `size_axes` with
-`n_channels` $=2$ and `n_register_images` $=2$; tile value is the replicate mean
-$\operatorname{mean}(R_{r,s})$ per $(\texttt{proc},\texttt{target\_px})$
-(log colour scale).
+`n_channels` = 2 and `n_register_images` = 2; tile value is the replicate mean:
 
-**Channel-count effect** (`08_channel_effect`). Points $(x_r,R_{r,s})$ for
-$s\in\{$REGISTER, PREPROCESS, SEGMENT, QUANTIFY$\}$ on `size_axes`, $x_r>0$; the
-overlaid trend is `geom_smooth(method="lm")` fit on the $\log_{10}$–$\log_{10}$
-axes, coloured by `n_channels`. No scalar emitted.
+```
+tile = mean of peak_rss_gb per (proc, target_px)   (log colour scale)
+```
+
+**Channel-count effect** (`08_channel_effect`). Points of `input_gb` vs
+`peak_rss_gb` for `proc` in REGISTER, PREPROCESS, SEGMENT, QUANTIFY on
+`size_axes`, `input_gb` > 0; the overlaid trend is `geom_smooth(method="lm")` fit
+on the log10-vs-log10 axes, coloured by `n_channels`. No scalar emitted.
 
 **Segmentation methods** (`09_segmentation_methods`, `09b_stardist_tile_grid`).
-On `segmentation_grid*` / `proc = SEGMENT`: fig 09 is the raw $T_{r,\texttt{SEGMENT}}$
-distribution (box = IQR) per `seg_method`. Fig 09b, `stardist` only, tiles
-$\operatorname{mean}(R)$ per $(\texttt{seg\_n\_tiles\_x},\texttt{seg\_n\_tiles\_y})$.
+On `segmentation_grid*` / `proc = SEGMENT`: fig 09 is the raw `realtime_s`
+distribution (box = IQR) per `seg_method`. Fig 09b, `stardist` only, tiles the
+mean of `peak_rss_gb` per `(seg_n_tiles_x, seg_n_tiles_y)`.
 
 **Registration knobs, both paths** (`10_registration_params_both_paths`). On
-`registration_param_grid` / `proc` $\in\texttt{reg\_leaves}$, the per-run
-registration peak is the **max over leaves**
+`registration_param_grid` / `proc` in `reg_leaves`, the per-run registration peak
+is the **max over leaves**, and the path is set from a flag:
 
-$$
-\texttt{reg\_peak\_gb}_r=\max_{s\in\texttt{reg\_leaves}} R_{r,s},
-\qquad \texttt{path}_r=\begin{cases}\texttt{distributed}&\texttt{truthy(reg\_distributed\_tiling)}\\\texttt{classic}&\text{else,}\end{cases}
-$$
+```
+reg_peak_gb per run = max of peak_rss_gb over the reg_leaves processes
+path = distributed if reg_distributed_tiling is truthy, else classic
 
-then averaged: $\operatorname{mean}(\texttt{reg\_peak\_gb})$ per
-$(\texttt{memory\_mode},\texttt{skip\_micro\_registration},\texttt{path})$.
+value = mean of reg_peak_gb
+        per (memory_mode, skip_micro_registration, path)
+```
 
 **Registration accuracy vs cost** (`11_accuracy_vs_cost`). The accuracy metric,
 `reg_tre_median_px` from `quality.csv` (feature-based **target registration
@@ -156,42 +169,48 @@ error**, median px per run — precomputed, see *Notes*), plotted vs
 
 **Segmentation cross-method agreement** (`12b_segmentation_agreement`; from
 `segmentation_agreement.csv`). Bar = `instance_f1` (IoU-matched per-cell F1 between
-`method_a` and `method_b`, $1=$ agree on every cell); text label = `cell_count_ratio`.
+`method_a` and `method_b`, 1 = agree on every cell); text label = `cell_count_ratio`.
 Both precomputed.
 
 **End-to-end cost vs size** (`13_end_to_end_cost`; from `run_cost.csv`, `size_axes`).
 Per `target_px`:
 
-$$
-\overline{\texttt{cpu\_hours}}=\operatorname{mean}(\texttt{cpu\_hours}),\qquad
-\overline{\texttt{wall\_clock\_h}}=\frac{\operatorname{mean}(\texttt{wall\_clock\_s})}{3600}.
-$$
+```
+mean cpu_hours = mean of cpu_hours
+mean wall clock hours = mean of wall_clock_s / 3600
+```
 
 **Bottleneck by size** (`14_bottleneck_by_size`; from `run_cost.csv`). Count runs
-per $(\texttt{target\_px},\texttt{bottleneck\_stage})$, drawn `position="fill"`, so
-each bar is the **share** $n_{\text{stage}}/\sum_{\text{stage}} n$ at that size.
+per `(target_px, bottleneck_stage)`, drawn `position="fill"`, so each bar is the
+**share** of that stage at that size:
+
+```
+bar share = count(stage) / total count   at that target_px
+```
 
 **Tiled path granularity** (`15_tiled_path_granularity`). On
-`distributed_tiling_grid` / `reg_leaves`, per run
-$\texttt{reg\_peak\_gb}_r=\max_s R_{r,s}$ and
-$\texttt{reg\_time\_s}_r=\sum_s T_{r,s}$; then $\operatorname{mean}(\texttt{reg\_peak\_gb})$
-per $(\texttt{reg\_dist\_tile\_wh},\texttt{reg\_dist\_tile\_buffer})$.
+`distributed_tiling_grid` / `reg_leaves`, per run:
+
+```
+reg_peak_gb per run = max of peak_rss_gb over the reg_leaves processes
+reg_time_s per run  = sum of realtime_s over the reg_leaves processes
+
+value = mean of reg_peak_gb per (reg_dist_tile_wh, reg_dist_tile_buffer)
+```
 
 **Tiled path pixel drift** (`16_tiled_drift_from_classic`; from
 `registration_drift.csv`, `path == "tiled"`). Mean of the precomputed
-`max_abs_delta` (max $|\Delta\text{intensity}|$ vs the classic slide; $0=$ identical)
-and `pct_pixels_diff` per $(\texttt{tile\_wh},\texttt{tile\_buffer})$.
+`max_abs_delta` (max absolute intensity difference vs the classic slide; 0 =
+identical) and `pct_pixels_diff` per `(tile_wh, tile_buffer)`.
 
 **Registration error by path** (`17_registration_error_by_path`; from `quality.csv`).
-`reg_tre_median_px` distribution per `path`, where
+`reg_tre_median_px` distribution per `path`, where:
 
-$$
-\texttt{path}=\begin{cases}
-\texttt{classic}   & \lnot\texttt{truthy(reg\_distributed\_tiling)}\\
-\texttt{tiled}     & \texttt{truthy(reg\_dist\_force\_tiling)}\\
-\texttt{separated} & \text{otherwise.}
-\end{cases}
-$$
+```
+path = classic    if reg_distributed_tiling is not truthy
+       tiled       if reg_dist_force_tiling is truthy
+       separated   otherwise
+```
 
 ## Figures
 
@@ -212,14 +231,14 @@ if (length(bench_figs)) {
 
 - **Accuracy metrics are read, not recomputed.** `reg_tre_median_px` (TRE),
   `max_abs_delta`/`pct_pixels_diff` (drift), `instance_f1`/`cell_count_ratio`
-  (segmentation agreement), `rss_saving_gb`, and `peak_rss_gb_mean/std` all arrive
-  precomputed in their CSVs. The only reductions `benchmark_plots.R` itself
-  performs are the log-log OLS ($\beta$, $R^2$), the per-run
-  $\max$/$\sum$ over `reg_leaves`, and replicate means/shares. The subtitles call
-  TRE a "feature TRE proxy"; treat it as a proxy, not a ground-truth landmark error.
+  (segmentation agreement), `rss_saving_gb`, and `peak_rss_gb_mean`/`peak_rss_gb_std`
+  all arrive precomputed in their CSVs. The only reductions `benchmark_plots.R`
+  itself performs are the log-log OLS (exponent, R^2), the per-run max/sum over
+  `reg_leaves`, and replicate means/shares. The subtitles call TRE a "feature TRE
+  proxy"; treat it as a proxy, not a ground-truth landmark error.
 - **Reductions are means over replicates** unless noted; SLURM isolates per-process
-  resources, so $R_{r,s}$ is one process's peak, and registration-stage RAM is the
-  max across its leaf processes within a run.
+  resources, so `peak_rss_gb` is one process's peak, and registration-stage RAM is
+  the max across its leaf processes within a run.
 - Any figure whose optional CSV (or required column) is missing is silently
   skipped; the rendered set depends on which sweep outputs were dropped into
   `data/benchmark/`.
