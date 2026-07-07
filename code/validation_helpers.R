@@ -284,7 +284,8 @@ region_ratios <- function(cells) {
     n_tumor_inside    = n_tumor,
     n_cd45_inside     = n_cd45,
     tumor_over_inside = safe(n_tumor, n_inside),
-    cd45_over_inside  = safe(n_cd45,  n_inside)
+    cd45_over_inside  = safe(n_cd45,  n_inside),
+    tumor_over_cd45   = safe(n_tumor, n_cd45)   # tumour cells per CD45+ cell inside
   )
   for (l in region_lineages) out[[paste0("n_", l)]]    <- ncount(l)
   for (l in region_lineages) out[[paste0("frac_", l)]] <- safe(ncount(l), n_inside)

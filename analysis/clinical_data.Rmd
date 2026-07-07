@@ -106,12 +106,19 @@ if (length(missing))
 
 ## Tumour content — IHC vs pathologist
 
+The IHC tumour metric is shown under **two normalizations**, both restricted to the
+cells inside the annotation:
+
 ```
-IHC (per annotation k) = tumor_over_inside of file <patient>_a<k>.csv's inside cells
-IHC (union)            = tumor_over_inside of the union inside cells
-pathologist (per ann)  = ANNOTATION_k / 100
-pathologist (union)    = mean of that patient's ANNOTATION_k / 100 values
+tumor_over_inside = (tumour cells inside) / (all cells inside)     -> 0..1
+tumor_over_cd45   = (tumour cells inside) / (CD45+ cells inside)   -> can exceed 1
+
+pathologist (per annotation) = ANNOTATION_k / 100
+pathologist (union)          = mean of that patient's ANNOTATION_k / 100 values
 ```
+
+Each normalization is computed both per-annotation (one polygon) and over the union
+of a patient's polygons.
 
 ```{r tumor-content}
 # PRIMARY = sf point-in-polygon on the geojson (fixed /0.325); CSV Out_of_annotation
@@ -170,23 +177,39 @@ concordance = Spearman correlation( IHC , pathologist )   across patients
 ```
 
 ```{r tumor-content-plot}
-plot_concordance <- function(df, subtitle) {
-  st <- paired_spearman(df$tumor_over_inside, df$path_frac)
-  ggplot(df, aes(tumor_over_inside, path_frac)) +
-    geom_abline(slope = 1, linetype = "dashed", colour = "red") +
+# `metric` selects the IHC normalization; `unit_scale` draws the x=y line and forces
+# a 0..1 square (only meaningful for tumor_over_inside — tumor_over_cd45 is unbounded
+# and pathologist is 0..1, so their scatter is judged by RANK, not the diagonal).
+plot_concordance <- function(df, metric, subtitle, xlab, unit_scale = TRUE) {
+  d  <- dplyr::filter(df, is.finite(.data[[metric]]), is.finite(path_frac))
+  st <- paired_spearman(d[[metric]], d$path_frac)
+  p <- ggplot(d, aes(.data[[metric]], path_frac)) +
     geom_point(alpha = 0.7, size = 2) +
-    coord_equal(xlim = c(0, 1), ylim = c(0, 1)) +
-    annotate("text", x = 0, y = 1, hjust = 0, vjust = 1,
+    annotate("text", x = -Inf, y = Inf, hjust = -0.05, vjust = 1.5,
              label = sprintf("Spearman rho = %.2f (p = %.3g, n = %d)",
                              st$rho, st$p, st$n)) +
     labs(title = "Neoplastic cellularity: IHC vs pathologist", subtitle = subtitle,
-         x = "IHC tumour fraction inside annotation",
-         y = "Pathologist tumour fraction") +
+         x = xlab, y = "Pathologist tumour fraction") +
     theme_classic(base_size = 12)
+  if (unit_scale)
+    p <- p + geom_abline(slope = 1, linetype = "dashed", colour = "red") +
+             coord_equal(xlim = c(0, 1), ylim = c(0, 1))
+  p
 }
 
-if (nrow(cc_ann)   > 0) print(plot_concordance(cc_ann,   "per annotation"))
-if (nrow(cc_union) > 0) print(plot_concordance(cc_union, "union of a patient's annotations"))
+norm_specs <- list(
+  list(metric = "tumor_over_inside", xlab = "IHC tumour / all cells inside",  unit = TRUE),
+  list(metric = "tumor_over_cd45",   xlab = "IHC tumour / CD45+ cells inside", unit = FALSE)
+)
+
+for (s in norm_specs) {
+  if (nrow(cc_ann) > 0)
+    print(plot_concordance(cc_ann, s$metric, paste0(s$metric, " — per annotation"),
+                           s$xlab, s$unit))
+  if (nrow(cc_union) > 0)
+    print(plot_concordance(cc_union, s$metric, paste0(s$metric, " — union"),
+                           s$xlab, s$unit))
+}
 ```
 
 **Bland–Altman (union).** Per patient:
@@ -200,21 +223,32 @@ LoA    = 1.96 * standard deviation of diff
 limits = bias plus/minus LoA
 ```
 
+Bland–Altman is strictly interpretable only when both quantities share the 0..1
+scale (i.e. `tumor_over_inside`); for `tumor_over_cd45` it is shown for consistency,
+but read it as descriptive since the CD45 ratio is unbounded.
+
 ```{r tumor-content-bland-altman}
-if (nrow(cc_union) > 2) {
-  ba <- cc_union |>
-    transmute(mean_val = (tumor_over_inside + path_frac) / 2,
-              diff_val = tumor_over_inside - path_frac)
+plot_bland_altman <- function(df, metric, title) {
+  d <- dplyr::filter(df, is.finite(.data[[metric]]), is.finite(path_frac))
+  if (nrow(d) <= 2) return(invisible())
+  ba <- d |> transmute(mean_val = (.data[[metric]] + path_frac) / 2,
+                       diff_val = .data[[metric]] - path_frac)
   bias <- mean(ba$diff_val); loa <- 1.96 * sd(ba$diff_val)
-  ggplot(ba, aes(mean_val, diff_val)) +
-    geom_hline(yintercept = bias, colour = "blue") +
-    geom_hline(yintercept = bias + c(-loa, loa), linetype = "dashed", colour = "grey40") +
-    geom_point(alpha = 0.7, size = 2) +
-    labs(title = "Bland–Altman: IHC − pathologist tumour fraction",
-         subtitle = sprintf("bias = %.3f, limits of agreement +/- %.3f", bias, loa),
-         x = "mean of the two", y = "IHC − pathologist") +
-    theme_classic(base_size = 12)
+  print(
+    ggplot(ba, aes(mean_val, diff_val)) +
+      geom_hline(yintercept = bias, colour = "blue") +
+      geom_hline(yintercept = bias + c(-loa, loa), linetype = "dashed", colour = "grey40") +
+      geom_point(alpha = 0.7, size = 2) +
+      labs(title = title,
+           subtitle = sprintf("bias = %.3f, limits of agreement +/- %.3f", bias, loa),
+           x = "mean of the two", y = "IHC − pathologist") +
+      theme_classic(base_size = 12)
+  )
 }
+
+for (s in norm_specs)
+  plot_bland_altman(cc_union, s$metric,
+                    paste0("Bland–Altman (union): ", s$metric, " − pathologist"))
 ```
 
 ## Immune infiltrate — IHC vs clinical immune phenotype
