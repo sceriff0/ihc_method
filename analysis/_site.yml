@@ -7,6 +7,8 @@ navbar:
     href: index.html
   - text: Tumour border
     href: periphery.html
+  - text: Membership QC
+    href: annotation_membership_qc.html
   - text: About
     href: about.html
   - text: License

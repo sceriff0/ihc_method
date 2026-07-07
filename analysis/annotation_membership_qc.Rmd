@@ -1,0 +1,120 @@
+---
+title: "Annotation membership QC — sf point-in-polygon vs Out_of_annotation flag"
+author: "sceriff0"
+date: "2026-07-07"
+output: workflowr::wflow_html
+editor_options:
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+suppressPackageStartupMessages({
+  library(tidyverse)
+  library(here)
+  library(sf)
+})
+
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE,
+                      fig.width = 8, fig.height = 5)
+
+# Loaders (gives neoplastic_data + the helpers). test.R prints colnames(); silence it.
+invisible(capture.output(suppressMessages(source(here("code", "test.R")))))
+source(here("code", "validation_helpers.R"))
+```
+
+## Purpose
+
+The main pipeline decides "inside the annotation" by **sf point-in-polygon** on the
+pathologist geojson, mapping cell centroids into the pixel frame with the fixed
+`centroid / 0.325`. FlowPath also ships a **precomputed `Out_of_annotation` flag**
+per annotation (the per-annotation csvs `<patient>_a<k>.csv`).
+
+This report cross-checks the two. Because the per-annotation csv carries *both* the
+centroid and the flag for the **same cells**, agreement is a direct per-cell
+comparison (no cross-file matching):
+
+```
+flag inside = Out_of_annotation is FALSE
+sf inside   = st_within( centroid / 0.325 , the ANNOTATION_k geojson polygon )
+```
+
+Per `(patient, annotation)` we report the two set sizes, their overlap (Jaccard and
+% of cells that agree), and the resulting tumour fraction under each method. A large
+flag-vs-sf gap on a slide means the fixed `0.325` conversion is wrong **for that
+slide** — sf is landing on the wrong cells.
+
+## Compute agreement
+
+```{r qc}
+# per-annotation flag csvs (only some patients have these); matches test.R's path style.
+PER_ANNOT_DIR <- path.expand("~/ihc_method/data/flowpath/per_annotation")
+
+annots <- load_annotations(patient_ids = neoplastic_data$SAMPLE)
+
+if (dir.exists(PER_ANNOT_DIR) && length(fs::dir_ls(PER_ANNOT_DIR, glob = "*.csv"))) {
+  qc <- annotation_membership_qc(PER_ANNOT_DIR, annots, um_per_px = 0.325)
+} else {
+  qc <- tibble::tibble()
+  cat("No per-annotation csvs found at", PER_ANNOT_DIR, "\n")
+}
+
+if (nrow(qc)) {
+  cat("annotations checked:", nrow(qc),
+      "| mean cell-level agreement:",
+      sprintf("%.1f%%", 100 * mean(qc$pct_cells_agree, na.rm = TRUE)),
+      "| mean Jaccard:", sprintf("%.2f", mean(qc$jaccard, na.rm = TRUE)), "\n")
+}
+```
+
+## Per-annotation agreement table
+
+`pct_cells_agree` = fraction of cells given the same inside/outside call by both
+methods. `jaccard` = |flag ∩ sf| / |flag ∪ sf| of the inside sets. The last two
+columns are the tumour-fraction-inside each method would feed into the concordance
+plots — they should be close if membership agrees.
+
+```{r qc-table}
+if (nrow(qc)) {
+  qc |>
+    mutate(across(c(jaccard, pct_cells_agree, tumor_frac_flag, tumor_frac_sf),
+                  ~ round(.x, 3))) |>
+    arrange(jaccard) |>
+    knitr::kable(caption = paste("sf vs Out_of_annotation flag, per annotation.",
+                                 "Low jaccard / pct_cells_agree = the /0.325 sf",
+                                 "disagrees with the flag on that slide."))
+}
+```
+
+## Tumour fraction: flag vs sf
+
+Each point is one annotation; the dashed line is perfect agreement. Points off the
+line are annotations where the two membership definitions give a different tumour
+fraction — those are the slides to distrust the sf conversion on.
+
+```{r qc-scatter}
+if (nrow(qc) && sum(is.finite(qc$tumor_frac_flag) & is.finite(qc$tumor_frac_sf)) > 1) {
+  d  <- qc |> filter(is.finite(tumor_frac_flag), is.finite(tumor_frac_sf))
+  cc <- paired_cor3(d$tumor_frac_flag, d$tumor_frac_sf)   # Pearson + Spearman + Kendall
+  ggplot(d, aes(tumor_frac_flag, tumor_frac_sf, colour = patient_id)) +
+    geom_abline(slope = 1, linetype = "dashed", colour = "red") +
+    geom_point(size = 3, alpha = 0.85) +
+    coord_equal(xlim = c(0, 1), ylim = c(0, 1)) +
+    annotate("text", x = 0, y = 1, hjust = 0, vjust = 1,
+             label = sprintf("Pearson r = %.2f\nSpearman rho = %.2f\nKendall tau = %.2f\n(n = %d)",
+                             cc$pearson, cc$spearman, cc$kendall, cc$n)) +
+    labs(title = "Tumour fraction inside: flag vs sf point-in-polygon",
+         x = "tumour fraction (Out_of_annotation flag)",
+         y = "tumour fraction (sf / 0.325)", colour = "patient") +
+    theme_classic(base_size = 12)
+}
+```
+
+## Notes
+
+- Only patients with per-annotation csvs **and** a matching geojson are checked; a
+  `note` column flags the ones skipped (missing geojson or columns).
+- High agreement here validates the fixed `0.325` conversion for those slides; a
+  slide with low agreement should either be excluded or given its own conversion.
+- This compares *membership*, not the pathologist — that concordance is in
+  `clinical_data.Rmd`.
+```

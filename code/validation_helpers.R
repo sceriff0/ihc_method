@@ -328,16 +328,20 @@ region_composition <- function(region_metrics,
   pts <- sf::st_as_sf(data.frame(x = cells_p$centroid_x / um_per_px,
                                  y = cells_p$centroid_y / um_per_px),
                       coords = c("x", "y"), crs = crs)
+  # The geojson polygon gives the region AREA, so region_ratios_area() adds area_mm2
+  # and cell DENSITIES (cells / mm^2, incl. tumour density) inside the annotation.
   if (scope == "union") {
-    poly_u <- sf::st_union(sf::st_geometry(polys_p))
-    inside <- lengths(sf::st_within(pts, poly_u)) > 0
-    region_ratios(cells_p[inside, , drop = FALSE]) |>
+    poly_u  <- sf::st_union(sf::st_geometry(polys_p))
+    inside  <- lengths(sf::st_within(pts, poly_u)) > 0
+    area_px <- as.numeric(sum(sf::st_area(poly_u)))
+    region_ratios_area(cells_p[inside, , drop = FALSE], area_px, um_per_px) |>
       dplyr::mutate(annotation = "union", source = "sf", .before = 1)
   } else {
     within <- sf::st_within(pts, polys_p)          # per-cell list of polygon indices
     purrr::map_dfr(seq_len(nrow(polys_p)), function(i) {
       inside_i <- vapply(within, function(idx) i %in% idx, logical(1))
-      region_ratios(cells_p[inside_i, , drop = FALSE]) |>
+      area_px  <- as.numeric(sf::st_area(sf::st_geometry(polys_p)[i]))
+      region_ratios_area(cells_p[inside_i, , drop = FALSE], area_px, um_per_px) |>
         dplyr::mutate(annotation = polys_p$annotation[i], source = "sf", .before = 1)
     })
   }
@@ -368,12 +372,68 @@ ihc_annotation_metrics <- function(ihc_data, annots,
       .annotation_metrics_sf(cells_p, polys_p, scope, um_per_px) |>
         dplyr::mutate(patient_id = pid, .before = 1)
     } else if (use_csv_fallback && "Out_of_annotation" %in% names(cells_p)) {
+      # no polygon -> no area, so area_mm2 / densities come back NA (schema matches sf).
       inside <- !.is_outside(cells_p$Out_of_annotation)
-      region_ratios(cells_p[inside, , drop = FALSE]) |>
+      region_ratios_area(cells_p[inside, , drop = FALSE], 0, um_per_px) |>
         dplyr::mutate(patient_id = pid, annotation = "csv", source = "csv", .before = 1)
     } else {
       tibble::tibble()  # no geojson and no CSV flag -> nothing to report
     }
+  })
+}
+
+# QC: does sf point-in-polygon agree with the precomputed `Out_of_annotation` flag?
+# For every per-annotation FlowPath csv `<patient>_a<k>.csv` in `dir` (each carries a
+# flag computed for ANNOTATION_k), compute BOTH memberships on the SAME cells —
+#   flag inside = !Out_of_annotation
+#   sf inside   = st_within(centroid / um_per_px, the ANNOTATION_k geojson polygon)
+# — so agreement is a direct per-cell comparison (no cross-file cell matching). One
+# row per (patient, annotation): set sizes, overlap (Jaccard, % of cells agreeing),
+# and the tumour fraction inside under each method. A large flag-vs-sf gap on a slide
+# means the fixed um_per_px is wrong FOR THAT slide (sf catching the wrong cells).
+annotation_membership_qc <- function(dir, annots, um_per_px = 0.325) {
+  files  <- fs::dir_ls(dir, glob = "*.csv")
+  annots <- dplyr::mutate(annots, .pid = slide_key(patient_id))
+
+  purrr::map_dfr(as.character(files), function(path) {
+    stem <- fs::path_ext_remove(fs::path_file(path))
+    m    <- stringr::str_match(stem, "^(.*)_a(\\d+)$")
+    if (any(is.na(m))) return(tibble::tibble())
+    pid  <- slide_key(m[, 2]); ann <- paste0("ANNOTATION_", m[, 3])
+
+    cells <- tibble::as_tibble(data.table::fread(path))
+    if (!all(c("centroid_x", "centroid_y", "Out_of_annotation") %in% names(cells)))
+      return(tibble::tibble(patient_id = pid, annotation = ann,
+                            note = "csv missing centroid / Out_of_annotation"))
+    poly <- dplyr::filter(annots, .pid == pid, annotation == ann)
+    if (nrow(poly) == 0)
+      return(tibble::tibble(patient_id = pid, annotation = ann,
+                            n_cells = nrow(cells), note = "no matching geojson"))
+
+    crs   <- sf::st_crs(poly)
+    pts   <- sf::st_as_sf(data.frame(x = cells$centroid_x / um_per_px,
+                                     y = cells$centroid_y / um_per_px),
+                          coords = c("x", "y"), crs = crs)
+    sf_in   <- lengths(sf::st_within(pts, sf::st_geometry(poly))) > 0
+    flag_in <- !.is_outside(cells$Out_of_annotation)
+    is_tum  <- if ("phenotype" %in% names(cells))
+      stringr::str_detect(tidyr::replace_na(cells$phenotype, ""), "Tumor")
+    else rep(NA, nrow(cells))
+
+    n_union <- sum(sf_in | flag_in)
+    frac    <- function(sel) if (sum(sel) > 0) sum(is_tum & sel) / sum(sel) else NA_real_
+    tibble::tibble(
+      patient_id      = pid, annotation = ann,
+      n_cells         = nrow(cells),
+      n_flag_inside   = sum(flag_in),
+      n_sf_inside     = sum(sf_in),
+      n_both          = sum(sf_in & flag_in),
+      jaccard         = if (n_union > 0) sum(sf_in & flag_in) / n_union else NA_real_,
+      pct_cells_agree = mean(sf_in == flag_in),
+      tumor_frac_flag = frac(flag_in),
+      tumor_frac_sf   = frac(sf_in),
+      note            = NA_character_
+    )
   })
 }
 
@@ -486,9 +546,10 @@ region_ratios_area <- function(cells, area_units2, um_per_unit) {
   rr       <- region_ratios(cells)
   area_mm2 <- area_units2 * (um_per_unit^2) / 1e6         # units^2 -> um^2 -> mm^2
   dens     <- function(n) if (is.finite(area_mm2) && area_mm2 > 0) n / area_mm2 else NA_real_
-  rr$area_mm2          <- if (area_mm2 > 0) area_mm2 else NA_real_
-  rr$dens_all_per_mm2  <- dens(rr$n_inside)
-  rr$dens_cd45_per_mm2 <- dens(rr$n_cd45_inside)
+  rr$area_mm2           <- if (is.finite(area_mm2) && area_mm2 > 0) area_mm2 else NA_real_
+  rr$dens_all_per_mm2   <- dens(rr$n_inside)
+  rr$dens_tumor_per_mm2 <- dens(rr$n_tumor_inside)   # tumour cells / mm^2 (neoplastic density)
+  rr$dens_cd45_per_mm2  <- dens(rr$n_cd45_inside)
   for (l in c("CD8T", "CD4T", "Treg", "NK"))
     rr[[paste0("dens_", l, "_per_mm2")]] <- dens(rr[[paste0("n_", l)]])
   rr
@@ -561,6 +622,26 @@ paired_spearman <- function(x, y) {
   }
   ct <- suppressWarnings(stats::cor.test(x, y, method = "spearman"))
   tibble::tibble(n = length(x), rho = unname(ct$estimate), p = ct$p.value)
+}
+
+# Pearson r, Spearman rho and Kendall tau for two paired numeric vectors, as a
+# one-row tibble with each estimate + its p-value + the shared n. Same small-n /
+# zero-variance guard as paired_spearman(). Use where all three are wanted side by
+# side (Pearson = linear, Spearman/Kendall = rank/monotonic and robust to outliers).
+paired_cor3 <- function(x, y) {
+  ok <- is.finite(x) & is.finite(y)
+  x <- x[ok]; y <- y[ok]; n <- length(x)
+  na_row <- tibble::tibble(n = n,
+                           pearson = NA_real_,  p_pearson  = NA_real_,
+                           spearman = NA_real_, p_spearman = NA_real_,
+                           kendall = NA_real_,  p_kendall  = NA_real_)
+  if (n < 3 || stats::sd(x) == 0 || stats::sd(y) == 0) return(na_row)
+  ct <- function(m) suppressWarnings(stats::cor.test(x, y, method = m))
+  pe <- ct("pearson"); sp <- ct("spearman"); ke <- ct("kendall")
+  tibble::tibble(n = n,
+                 pearson  = unname(pe$estimate), p_pearson  = pe$p.value,
+                 spearman = unname(sp$estimate), p_spearman = sp$p.value,
+                 kendall  = unname(ke$estimate), p_kendall  = ke$p.value)
 }
 
 # Pairwise cross-source agreement, for comparing several deconvolution methods (and

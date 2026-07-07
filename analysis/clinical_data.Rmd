@@ -110,12 +110,20 @@ The IHC tumour metric is shown under **two normalizations**, both restricted to 
 cells inside the annotation:
 
 ```
-tumor_over_inside = (tumour cells inside) / (all cells inside)     -> 0..1
-tumor_over_cd45   = (tumour cells inside) / (CD45+ cells inside)   -> can exceed 1
+tumor_over_inside  = (tumour cells inside) / (all cells inside)      -> 0..1
+tumor_over_cd45    = (tumour cells inside) / (CD45+ cells inside)    -> can exceed 1
+dens_tumor_per_mm2 = (tumour cells inside) / (annotation area in mm^2)   [geojson patients only]
+                     area_mm2 = polygon pixel area * 0.325^2 / 1e6
 
 pathologist (per annotation) = ANNOTATION_k / 100
 pathologist (union)          = mean of that patient's ANNOTATION_k / 100 values
 ```
+
+`dens_tumor_per_mm2` is the same tumour-cell density (cells/mm²) that periphery
+reports, computed here inside the whole annotation. It needs the polygon area, so it
+is only defined for patients with a geojson (`NA` for the CSV-fallback ones), and —
+being a density, not a 0..1 fraction — it is compared to the pathologist by **rank**
+(Spearman/Kendall), not the x=y line.
 
 Each normalization is computed both per-annotation (one polygon) and over the union
 of a patient's polygons.
@@ -153,7 +161,9 @@ cat("per-annotation pairs:", nrow(cc_ann), " | union pairs:", nrow(cc_union), "\
 #   - per-annotation only: verify geojson _a<k> lines up with pathologist ANNOTATION_k
 cc_union |>
   transmute(patient_id, source, n_inside,
+            area_mm2       = round(area_mm2, 3),
             ihc_tumor_frac = round(tumor_over_inside, 3),
+            dens_tumor_mm2 = round(dens_tumor_per_mm2, 1),
             path_frac      = round(path_frac, 3),
             abs_gap        = round(abs(tumor_over_inside - path_frac), 3)) |>
   arrange(desc(abs_gap)) |>
@@ -168,12 +178,14 @@ cc_ann |>
   knitr::kable(caption = "PER-ANNOTATION concordance pairs (largest gap first). Confirm each geojson _a<k> is the pathologist's ANNOTATION_k.")
 ```
 
-**Concordance statistic.** `paired_spearman(x, y)` = Spearman rank correlation
-between the two vectors across the shared patients, plus its p-value and the pair
-count `n`. It is `NA` when `n < 3` or either vector is constant.
+**Concordance statistics.** `paired_cor3(x, y)` reports three correlations between
+IHC and pathologist across the shared patients, each `NA` when `n < 3` or either
+vector is constant:
 
 ```
-concordance = Spearman correlation( IHC , pathologist )   across patients
+Pearson r    = linear correlation
+Spearman rho = rank correlation (monotonic, robust to outliers)
+Kendall tau  = rank concordance (pairwise, best-behaved at small n)
 ```
 
 ```{r tumor-content-plot}
@@ -182,12 +194,12 @@ concordance = Spearman correlation( IHC , pathologist )   across patients
 # and pathologist is 0..1, so their scatter is judged by RANK, not the diagonal).
 plot_concordance <- function(df, metric, subtitle, xlab, unit_scale = TRUE) {
   d  <- dplyr::filter(df, is.finite(.data[[metric]]), is.finite(path_frac))
-  st <- paired_spearman(d[[metric]], d$path_frac)
+  cc <- paired_cor3(d[[metric]], d$path_frac)   # Pearson + Spearman + Kendall
   p <- ggplot(d, aes(.data[[metric]], path_frac)) +
     geom_point(alpha = 0.7, size = 2) +
-    annotate("text", x = -Inf, y = Inf, hjust = -0.05, vjust = 1.5,
-             label = sprintf("Spearman rho = %.2f (p = %.3g, n = %d)",
-                             st$rho, st$p, st$n)) +
+    annotate("text", x = -Inf, y = Inf, hjust = -0.05, vjust = 1.2,
+             label = sprintf("Pearson r = %.2f\nSpearman rho = %.2f\nKendall tau = %.2f\n(n = %d)",
+                             cc$pearson, cc$spearman, cc$kendall, cc$n)) +
     labs(title = "Neoplastic cellularity: IHC vs pathologist", subtitle = subtitle,
          x = xlab, y = "Pathologist tumour fraction") +
     theme_classic(base_size = 12)
@@ -198,8 +210,9 @@ plot_concordance <- function(df, metric, subtitle, xlab, unit_scale = TRUE) {
 }
 
 norm_specs <- list(
-  list(metric = "tumor_over_inside", xlab = "IHC tumour / all cells inside",  unit = TRUE),
-  list(metric = "tumor_over_cd45",   xlab = "IHC tumour / CD45+ cells inside", unit = FALSE)
+  list(metric = "tumor_over_inside",  xlab = "IHC tumour / all cells inside",  unit = TRUE),
+  list(metric = "tumor_over_cd45",    xlab = "IHC tumour / CD45+ cells inside", unit = FALSE),
+  list(metric = "dens_tumor_per_mm2", xlab = "IHC tumour density (cells / mm²) inside", unit = FALSE)
 )
 
 for (s in norm_specs) {

@@ -327,6 +327,48 @@ if (nrow(comp) > 0) {
 }
 ```
 
+## Margin cell-type fractions: hot vs cold
+
+Same margin-band composition (d = 500 µm, union), now split by the clinical
+`Immuno-phenotype`: for each lineage, the boxes contrast **hot** vs **cold** tumours.
+
+```
+group(patient) = hot / intermediate / cold   (from clinical Immuno-phenotype)
+compared per lineage and per denominator (of all cells / tumour cells / CD45+ cells)
+```
+
+```{r margin-composition-hotcold, fig.height=5}
+comp_hc <- peri_union |>
+  filter(region == "margin", threshold_um == 500) |>
+  region_composition() |>
+  inner_join(clin, by = "patient_id") |>
+  filter(!is.na(immuno_phe)) |>
+  mutate(immuno_phe = hotcold_order(immuno_phe)) |>   # cold -> intermediate -> hot
+  pivot_longer(c(frac_inside, frac_tumor, frac_cd45),
+               names_to = "normalization", values_to = "frac") |>
+  mutate(normalization = factor(
+           c(frac_inside = "of all cells", frac_tumor = "of tumour cells",
+             frac_cd45 = "of CD45+ cells")[normalization],
+           levels = c("of all cells", "of tumour cells", "of CD45+ cells"))) |>
+  filter(is.finite(frac))
+
+if (nrow(comp_hc) > 0 && dplyr::n_distinct(na.omit(comp_hc$immuno_phe)) > 1) {
+  ggplot(comp_hc, aes(lineage, frac, colour = immuno_phe)) +
+    geom_boxplot(outlier.shape = NA, position = position_dodge(width = .75)) +
+    geom_point(position = position_jitterdodge(jitter.width = .12, dodge.width = .75),
+               alpha = .6, size = 1) +
+    facet_wrap(~ normalization, scales = "free_y") +
+    scale_colour_manual(values = hotcold_cols(levels(comp_hc$immuno_phe)),
+                        name = "Immuno-phenotype") +   # hot = red, cold = light blue
+    labs(title = "Invasive-margin cell-type fractions: hot vs cold (d = 500 µm)",
+         subtitle = sprintf("%d patients with a margin band and an immuno-phenotype",
+                            dplyr::n_distinct(comp_hc$patient_id)),
+         x = NULL, y = "fraction in margin band") +
+    theme_classic(base_size = 11) +
+    theme(axis.text.x = element_text(angle = 30, hjust = 1))
+}
+```
+
 ## Notes
 
 - Band width is physical: each polygon is buffered by `d / 0.325` pixel units; the
