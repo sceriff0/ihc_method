@@ -141,6 +141,26 @@ is_pos <- function(x) {
   tolower(trimws(as.character(x))) %in% c("+", "pos", "positive", "yes", "true", "1")
 }
 
+# is_pos() for a `<marker>_sign` column that may be absent from a given cell table
+# (returns all-FALSE rather than erroring, so marker-gated populations degrade to
+# n = 0 on any export that lacks the channel).
+marker_pos <- function(cells, marker) {
+  col <- paste0(marker, "_sign")
+  if (!col %in% names(cells)) return(rep(FALSE, nrow(cells)))
+  is_pos(cells[[col]])
+}
+
+# Arcsine square-root ("angular") transform for proportions, the classic variance-
+# stabiliser for data bounded in [0, 1]: it de-compresses the crowded 0/1 tails so
+# a fraction's variance stops shrinking near the bounds. Values are clamped to
+# [0, 1] first (guards tiny FP overshoot); anything outside — e.g. the unbounded
+# tumor_over_cd45 ratio — becomes NA, since the transform is only meaningful for
+# true proportions. Range of the result is [0, pi/2].
+asin_sqrt <- function(p) {
+  p <- ifelse(is.finite(p) & p >= 0 & p <= 1, p, NA_real_)
+  asin(sqrt(p))
+}
+
 # --- Phenotype / cell-type vocabulary ---------------------------------------
 # `phenotype_clean` (the parenthetical label in `phenotype`) is the cell type.
 # Collapse the 12 observed labels into lineages that have a bulk-RNA counterpart.
@@ -271,11 +291,19 @@ region_ratios <- function(cells) {
   n_inside <- nrow(cells)
   is_tumor <- if (n_inside) stringr::str_detect(tidyr::replace_na(cells$phenotype_clean, ""), "Tumor") else logical(0)
   is_cd45  <- if (n_inside) is_pos(cells$CD45_sign) else logical(0)
+  # Marker-gated (not phenotype-gated) subsets: CD3+CD45+ = marker-defined T cells;
+  # GZMB+ NK = cytotoxic/activated NK (lineage NK AND granzyme-B positive).
+  is_cd3   <- if (n_inside) marker_pos(cells, "CD3")  else logical(0)
+  is_gzmb  <- if (n_inside) marker_pos(cells, "GZMB") else logical(0)
   lin      <- if (n_inside)
     dplyr::left_join(tibble::tibble(phenotype_clean = cells$phenotype_clean),
                      phenotype_lineage, by = "phenotype_clean")$lineage else character(0)
+  is_nk    <- if (n_inside) lin == "NK" else logical(0)
   n_tumor  <- sum(is_tumor, na.rm = TRUE)
   n_cd45   <- sum(is_cd45,  na.rm = TRUE)
+  n_nk     <- sum(is_nk,    na.rm = TRUE)
+  n_cd3cd45 <- sum(is_cd45 & is_cd3, na.rm = TRUE)   # CD45+ AND CD3+ (marker T cells)
+  n_gzmb_nk <- sum(is_nk  & is_gzmb, na.rm = TRUE)   # NK lineage AND GZMB+
   ncount   <- function(l) sum(lin == l, na.rm = TRUE)
   safe     <- function(num, den) if (den > 0) num / den else NA_real_
 
@@ -283,9 +311,18 @@ region_ratios <- function(cells) {
     n_inside          = n_inside,
     n_tumor_inside    = n_tumor,
     n_cd45_inside     = n_cd45,
+    n_cd3cd45_inside  = n_cd3cd45,
+    n_gzmb_nk_inside  = n_gzmb_nk,
     tumor_over_inside = safe(n_tumor, n_inside),
     cd45_over_inside  = safe(n_cd45,  n_inside),
-    tumor_over_cd45   = safe(n_tumor, n_cd45)   # tumour cells per CD45+ cell inside
+    tumor_over_cd45   = safe(n_tumor, n_cd45),  # tumour cells per CD45+ cell inside
+    # CD3+CD45+ T cells: as a share of all cells, and of the CD45+ compartment.
+    cd3cd45_over_inside = safe(n_cd3cd45, n_inside),
+    cd3cd45_over_cd45   = safe(n_cd3cd45, n_cd45),
+    # GZMB+ NK: as a share of all cells, and the GZMB+ fraction WITHIN NK cells
+    # (an NK-activation readout).
+    gzmb_nk_over_inside = safe(n_gzmb_nk, n_inside),
+    gzmb_nk_over_nk     = safe(n_gzmb_nk, n_nk)
   )
   for (l in region_lineages) out[[paste0("n_", l)]]    <- ncount(l)
   for (l in region_lineages) out[[paste0("frac_", l)]] <- safe(ncount(l), n_inside)
@@ -299,15 +336,27 @@ region_ratios <- function(cells) {
 #   frac_inside = lineage / all cells inside   (overall composition)
 #   frac_tumor  = lineage / tumour cells inside (immune-to-tumour density)
 #   frac_cd45   = lineage / CD45+ cells inside  (composition of the immune compartment)
+# `markers` optionally adds marker-gated populations (label -> count column from
+# region_ratios, e.g. c("CD3+ CD45+" = "n_cd3cd45_inside")) alongside the phenotype
+# lineages; default NULL keeps the lineage-only behaviour every existing caller
+# relies on. Each population is materialised under a collision-free "pop::" name so
+# a count that is also a denominator (n_cd45_inside) can appear as a population too.
 region_composition <- function(region_metrics,
-                               lineages = c("CD8T", "CD4T", "Treg", "NK", "Immune_other")) {
+                               lineages = c("CD8T", "CD4T", "Treg", "NK", "Immune_other"),
+                               markers  = NULL) {
   id_cols <- intersect(c("patient_id", "annotation", "source"), names(region_metrics))
-  region_metrics |>
-    dplyr::select(dplyr::all_of(c(id_cols, "n_inside", "n_tumor_inside", "n_cd45_inside")),
-                  dplyr::all_of(paste0("n_", lineages))) |>
-    tidyr::pivot_longer(dplyr::all_of(paste0("n_", lineages)),
-                        names_to = "lineage", names_prefix = "n_", values_to = "n_cell") |>
+  pop_map <- c(stats::setNames(paste0("n_", lineages), lineages),
+               markers[markers %in% names(region_metrics)])
+
+  wide <- region_metrics |>
+    dplyr::select(dplyr::all_of(c(id_cols, "n_inside", "n_tumor_inside", "n_cd45_inside")))
+  for (lab in names(pop_map)) wide[[paste0("pop::", lab)]] <- region_metrics[[pop_map[[lab]]]]
+
+  wide |>
+    tidyr::pivot_longer(dplyr::starts_with("pop::"),
+                        names_to = "lineage", names_prefix = "pop::", values_to = "n_cell") |>
     dplyr::mutate(
+      lineage     = factor(lineage, levels = names(pop_map)),  # keep call-site order
       frac_inside = dplyr::if_else(n_inside       > 0, n_cell / n_inside,       NA_real_),
       frac_tumor  = dplyr::if_else(n_tumor_inside > 0, n_cell / n_tumor_inside, NA_real_),
       frac_cd45   = dplyr::if_else(n_cd45_inside  > 0, n_cell / n_cd45_inside,  NA_real_)

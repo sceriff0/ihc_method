@@ -20,7 +20,7 @@ bench_dir  <- here("data", "benchmark")
 have_bench <- file.exists(file.path(bench_dir, "measurements.csv"))
 ```
 
-## Purpose
+## Starting data and notation
 
 Mirage image-processing **pipeline benchmark** — resource scaling, registration
 cost/accuracy, and segmentation-method comparison from the SLURM sweep. Every
@@ -28,8 +28,6 @@ figure is built by sourcing `code/benchmark_plots.R` (vendored from
 `benchmarks/analysis/plots.R`) and rendered **inline from the sweep CSVs** — no
 PNGs on disk. This report is a formula index for those figures: for each one it
 states the raw columns consumed and the exact reduction to the plotted value.
-
-## Starting data and notation
 
 The core input is **`data/benchmark/measurements.csv`** — one row per
 run-and-process. `proc` is the `process` string with everything up to the last

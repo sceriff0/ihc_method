@@ -475,5 +475,3 @@ if (!is.null(agr) && nrow(agr) > 0) {
 - The CIBERSORT and BayesPrism blocks are scaffolds — verify `set_cibersort_*()`
   and `omnideconv::build_model()/deconvolute()` argument names against your
   installed versions before trusting their output.
-</content>
-</invoke>

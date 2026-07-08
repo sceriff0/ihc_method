@@ -70,18 +70,25 @@ For a set of cells (either one annotation's inside cells or the union inside
 cells), `region_ratios()` returns:
 
 ```
-n_inside        = number of cells in the set
-n_tumor_inside  = tumour cells in the set
-n_cd45_inside   = CD45+ cells in the set
-n_<lineage>     = cells in the set with that lineage
-                  (lineage in: CD8T, CD4T, Treg, NK, Immune_other, Stroma)
+n_inside          = number of cells in the set
+n_tumor_inside    = tumour cells in the set
+n_cd45_inside     = CD45+ cells in the set
+n_cd3cd45_inside  = CD45+ AND CD3+ cells (marker-gated T cells)
+n_gzmb_nk_inside  = NK-lineage cells that are GZMB+ (cytotoxic/activated NK)
+n_<lineage>       = cells in the set with that lineage
+                    (lineage in: CD8T, CD4T, Treg, NK, Immune_other, Stroma)
 
-tumor_over_inside = n_tumor_inside / n_inside
-cd45_over_inside  = n_cd45_inside  / n_inside
-frac_<lineage>    = n_<lineage>    / n_inside
+tumor_over_inside   = n_tumor_inside   / n_inside
+cd45_over_inside    = n_cd45_inside    / n_inside
+cd3cd45_over_inside = n_cd3cd45_inside / n_inside
+cd3cd45_over_cd45   = n_cd3cd45_inside / n_cd45_inside   (T cells among immune)
+gzmb_nk_over_inside = n_gzmb_nk_inside / n_inside
+gzmb_nk_over_nk     = n_gzmb_nk_inside / n_NK            (GZMB+ fraction of NK)
+frac_<lineage>      = n_<lineage>      / n_inside
 ```
 
-Any fraction with a zero denominator is `NA`.
+Any fraction with a zero denominator is `NA`. The marker-gated subsets use
+`<marker>_sign` (`is_pos`), not the phenotype label.
 
 ```{r annotations}
 # Pathologist geojson polygons (primary membership source).
@@ -269,9 +276,16 @@ for (s in norm_specs)
 Per patient, over the **union** inside cells:
 
 ```
-cd45_over_inside = n_cd45_inside / n_inside
-frac_<lineage>   = n_<lineage>   / n_inside     (lineage in CD8T, CD4T, Treg, NK)
+cd45_over_inside    = n_cd45_inside    / n_inside   (all CD45+ cells)
+frac_<lineage>      = n_<lineage>      / n_inside   (lineage in CD8T, CD4T, Treg, NK)
+cd3cd45_over_inside = n_cd3cd45_inside / n_inside   (marker CD3+CD45+ T cells)
+gzmb_nk_over_inside = n_gzmb_nk_inside / n_inside   (GZMB+ NK cells)
 ```
+
+`cd3cd45` (CD45+ AND CD3+) and `gzmb_nk` (NK lineage AND GZMB+) are **marker-gated**
+subsets — defined by `<marker>_sign`, not the phenotype label — so they sit
+alongside the phenotype lineages as extra readouts of overall immune (CD45+),
+T-cell (CD3+CD45+) and cytotoxic-NK (GZMB+ NK) content.
 
 Clinical references: `HOT score` (continuous) and `Immuno-phenotype` (categorical),
 joined on `slide_key(`ID PATIENT`)`.
@@ -284,7 +298,8 @@ clin <- clinical_data |>
          immuno_phe = any_of("Immuno-phenotype"))
 
 infiltrate <- ihc_tumor_union |>
-  select(patient_id, cd45_over_inside, frac_CD8T, frac_CD4T, frac_Treg, frac_NK) |>
+  select(patient_id, cd45_over_inside, frac_CD8T, frac_CD4T, frac_Treg, frac_NK,
+         cd3cd45_over_inside, gzmb_nk_over_inside) |>
   inner_join(clin, by = "patient_id")
 
 cat("patients with IHC infiltrate + clinical immune phenotype:", nrow(infiltrate), "\n")
@@ -310,60 +325,111 @@ if ("hot_score" %in% names(infiltrate) &&
 ```
 
 Grouped by `Immuno-phenotype` (ordered cold -> intermediate -> hot); each box is
-the distribution of the IHC fraction within a phenotype group.
+the distribution of the IHC fraction within a phenotype group. Metrics now include
+the marker-gated CD45+, CD3+CD45+ and GZMB+ NK readouts.
 
 ```{r infiltrate-phenotype}
-if ("immuno_phe" %in% names(infiltrate) &&
-    dplyr::n_distinct(na.omit(infiltrate$immuno_phe)) > 1) {
+# The metrics carried into every immuno-phenotype comparison (all are 0..1
+# fractions of the cells inside the tumour region, so the arcsin panel below can
+# transform them all).
+infiltrate_metrics <- c("cd45_over_inside", "cd3cd45_over_inside", "gzmb_nk_over_inside",
+                        "frac_CD8T", "frac_CD4T", "frac_Treg", "frac_NK")
+
+# One boxplot-by-phenotype figure; `transform` is applied to the fraction so the
+# same code draws the raw and the arcsin-sqrt panels (see next chunk).
+plot_infiltrate_phenotype <- function(infiltrate, ylab, transform = identity) {
+  if (!("immuno_phe" %in% names(infiltrate)) ||
+      dplyr::n_distinct(na.omit(infiltrate$immuno_phe)) <= 1) return(invisible())
   df <- infiltrate |>
-    pivot_longer(c(cd45_over_inside, frac_CD8T, frac_CD4T, frac_Treg, frac_NK),
-                 names_to = "ihc_metric", values_to = "frac") |>
-    filter(!is.na(immuno_phe), !is.na(frac)) |>
-    mutate(immuno_phe = hotcold_order(immuno_phe))
-  ggplot(df, aes(immuno_phe, frac, colour = immuno_phe)) +
+    pivot_longer(all_of(infiltrate_metrics), names_to = "ihc_metric", values_to = "frac") |>
+    filter(!is.na(immuno_phe), is.finite(frac)) |>
+    mutate(immuno_phe = hotcold_order(immuno_phe), value = transform(frac)) |>
+    filter(is.finite(value))
+  ggplot(df, aes(immuno_phe, value, colour = immuno_phe)) +
     geom_boxplot(outlier.shape = NA) +
     geom_jitter(width = 0.2, alpha = 0.6) +
     facet_wrap(~ ihc_metric, scales = "free_y") +
     scale_colour_manual(values = hotcold_cols(levels(df$immuno_phe)),
                         name = "Immuno-phenotype") +
     labs(title = "IHC infiltrate metrics by clinical immuno-phenotype",
-         x = NULL, y = "fraction inside tumour region", colour = "Immuno-phenotype") +
+         x = NULL, y = ylab, colour = "Immuno-phenotype") +
     theme_classic(base_size = 11) +
     theme(axis.text.x = element_text(angle = 30, hjust = 1))
 }
+
+plot_infiltrate_phenotype(infiltrate, "fraction inside tumour region")
+```
+
+**Arcsin-transformed.** The same metrics under the arcsine square-root transform
+(`asin(sqrt(fraction))`), which stabilises the variance of a proportion by
+stretching the crowded 0/1 tails — read the boxes as the transformed scale, not raw
+fractions.
+
+```{r infiltrate-phenotype-arcsin}
+plot_infiltrate_phenotype(infiltrate, "arcsin(sqrt(fraction))", transform = asin_sqrt)
 ```
 
 ### Composition under three denominators
 
-Same lineage counts, three denominators (each `NA` when its denominator is 0):
+Same population counts, three denominators (each `NA` when its denominator is 0).
+Alongside the phenotype lineages, the marker-gated **CD45+**, **CD3+ CD45+** and
+**GZMB+ NK** populations are included:
 
 ```
-frac_inside = n_<lineage> / n_inside         (of all cells inside)
-frac_tumor  = n_<lineage> / n_tumor_inside   (of tumour cells inside)
-frac_cd45   = n_<lineage> / n_cd45_inside    (of CD45+ cells inside)
+frac_inside = n_<population> / n_inside         (of all cells inside)
+frac_tumor  = n_<population> / n_tumor_inside   (of tumour cells inside)
+frac_cd45   = n_<population> / n_cd45_inside    (of CD45+ cells inside)
+
+populations = CD8T, CD4T, Treg, NK, Immune_other        (phenotype lineages)
+            + CD45+, CD3+ CD45+, GZMB+ NK               (marker-gated subsets)
 ```
+
+Note `frac_cd45` for the CD45+ population is 1 by construction (a self-normalisation
+check), and marker-gated subsets are shown under all three denominators for
+consistency with the lineages.
 
 ```{r infiltrate-composition, fig.height=5}
-comp <- region_composition(ihc_tumor_union) |>
-  pivot_longer(c(frac_inside, frac_tumor, frac_cd45),
-               names_to = "normalization", values_to = "frac") |>
-  mutate(normalization = factor(
-           c(frac_inside = "of all cells", frac_tumor = "of tumour cells",
-             frac_cd45 = "of CD45+ cells")[normalization],
-           levels = c("of all cells", "of tumour cells", "of CD45+ cells"))) |>
-  filter(is.finite(frac))
+# Marker-gated populations to add to the phenotype lineages (label -> count column
+# from region_ratios). CD45+ = all immune; CD3+CD45+ = marker T cells; GZMB+ NK.
+comp_markers <- c("CD45+"      = "n_cd45_inside",
+                  "CD3+ CD45+" = "n_cd3cd45_inside",
+                  "GZMB+ NK"   = "n_gzmb_nk_inside")
 
-if (nrow(comp) > 0) {
-  ggplot(comp, aes(lineage, frac, fill = lineage)) +
+# One composition figure (population x denominator); `transform` applied to the
+# fraction so the same code draws the raw and the arcsin-sqrt panels.
+plot_composition <- function(region_metrics, ylab, caption, transform = identity) {
+  comp <- region_composition(region_metrics, markers = comp_markers) |>
+    pivot_longer(c(frac_inside, frac_tumor, frac_cd45),
+                 names_to = "normalization", values_to = "frac") |>
+    mutate(normalization = factor(
+             c(frac_inside = "of all cells", frac_tumor = "of tumour cells",
+               frac_cd45 = "of CD45+ cells")[normalization],
+             levels = c("of all cells", "of tumour cells", "of CD45+ cells")),
+           value = transform(frac)) |>
+    filter(is.finite(value))
+  if (nrow(comp) == 0) return(invisible())
+  ggplot(comp, aes(lineage, value, fill = lineage)) +
     geom_boxplot(outlier.shape = NA, colour = "grey30") +
     geom_jitter(width = .15, alpha = .5, size = 1) +
     facet_wrap(~ normalization, scales = "free_y") +
     scale_fill_manual(values = oi, guide = "none") +
     labs(title = "IHC immune composition inside the tumour region",
-         x = NULL, y = "fraction", caption = "denominators: all cells / tumour cells / CD45+ cells inside") +
+         x = NULL, y = ylab, caption = caption) +
     theme_classic(base_size = 11) +
     theme(axis.text.x = element_text(angle = 30, hjust = 1))
 }
+
+plot_composition(ihc_tumor_union, "fraction",
+                 "denominators: all cells / tumour cells / CD45+ cells inside")
+```
+
+**Arcsin-transformed.** Same composition under the arcsine square-root transform
+of each fraction.
+
+```{r infiltrate-composition-arcsin, fig.height=5}
+plot_composition(ihc_tumor_union, "arcsin(sqrt(fraction))",
+                 "arcsin-sqrt of: all cells / tumour cells / CD45+ cells inside",
+                 transform = asin_sqrt)
 ```
 
 ## Biological-validity QC — whole-slide IHC immune readout vs clinical table

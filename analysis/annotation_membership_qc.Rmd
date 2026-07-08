@@ -22,14 +22,21 @@ invisible(capture.output(suppressMessages(source(here("code", "test.R")))))
 source(here("code", "validation_helpers.R"))
 ```
 
-## Purpose
+## Starting data and notation
+
+Every value below is derived from two inputs, compared **per cell**:
+
+- `<patient>_a<k>.csv` — FlowPath per-annotation cell exports (one row per cell)
+  under `~/ihc_method/data/flowpath/per_annotation`, carrying **both** the cell
+  `centroid` and the precomputed `Out_of_annotation` flag for the same cells. Only
+  some patients have these.
+- the pathologist annotation **geojson** polygons (`ANNOTATION_k`, in pixels),
+  loaded via `load_annotations()` for the patients in `neoplastic_data$SAMPLE`.
 
 The main pipeline decides "inside the annotation" by **sf point-in-polygon** on the
 pathologist geojson, mapping cell centroids into the pixel frame with the fixed
-`centroid / 0.325`. FlowPath also ships a **precomputed `Out_of_annotation` flag**
-per annotation (the per-annotation csvs `<patient>_a<k>.csv`).
-
-This report cross-checks the two. Because the per-annotation csv carries *both* the
+`centroid / 0.325`. This report cross-checks that against the shipped
+`Out_of_annotation` flag. Because the per-annotation csv carries *both* the
 centroid and the flag for the **same cells**, agreement is a direct per-cell
 comparison (no cross-file matching):
 

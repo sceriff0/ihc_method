@@ -25,7 +25,7 @@ invisible(capture.output(suppressMessages(source(here("code", "test.R")))))
 source(here("code", "validation_helpers.R"))
 ```
 
-## Starting data and geometry
+## Starting data and notation
 
 Inputs: `ihc_data` (whole-slide FlowPath cells, one copy per patient, with
 `centroid_x`/`centroid_y` in **microns**), the pathologist annotation **geojson**
