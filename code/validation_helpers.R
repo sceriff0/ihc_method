@@ -251,7 +251,11 @@ read_polygon_geojson <- function(path) {
 
 # Load every annotation polygon under `dir`, keyed by patient and annotation index
 # from the filename `<patient_id>_a<k>.geojson` -> annotation "ANNOTATION_<k>"
-# (matching neoplastic_data's ANNOTATION_1..3 columns).
+# (matching neoplastic_data's ANNOTATION_1..3 columns). Single-annotation patients
+# export a bare `<patient_id>.geojson` (no `_a<k>` suffix); those are treated as
+# that patient's sole ANNOTATION_1 (in neoplastic_data such patients carry tumour
+# content only in ANNOTATION_1). Without this, the `_a<k>` regex leaves patient_id
+# NA and the patient_ids filter below silently drops them.
 load_annotations <- function(dir = here::here("data", "annotation"),
                              patient_ids = NULL) {
   files <- fs::dir_ls(dir, glob = "*.geojson")
@@ -261,7 +265,11 @@ load_annotations <- function(dir = here::here("data", "annotation"),
     path = as.character(files),
     stem = fs::path_ext_remove(fs::path_file(files))
   ) |>
-    tidyr::extract(stem, c("patient_id", "ann_num"), "^(.*)_a(\\d+)$", remove = FALSE)
+    tidyr::extract(stem, c("patient_id", "ann_num"), "^(.*)_a(\\d+)$", remove = FALSE) |>
+    dplyr::mutate(
+      patient_id = dplyr::coalesce(patient_id, stem),
+      ann_num    = dplyr::coalesce(ann_num, "1")
+    )
 
   if (!is.null(patient_ids)) {
     keep <- norm_id(meta$patient_id) %in% norm_id(patient_ids)
@@ -447,7 +455,9 @@ annotation_membership_qc <- function(dir, annots, um_per_px = 0.325) {
   purrr::map_dfr(as.character(files), function(path) {
     stem <- fs::path_ext_remove(fs::path_file(path))
     m    <- stringr::str_match(stem, "^(.*)_a(\\d+)$")
-    if (any(is.na(m))) return(tibble::tibble())
+    # Bare `<patient>.csv` (single-annotation patient, no `_a<k>` suffix) -> the
+    # patient's sole ANNOTATION_1, mirroring load_annotations().
+    if (any(is.na(m))) m <- cbind(stem, stem, "1")
     pid  <- slide_key(m[, 2]); ann <- paste0("ANNOTATION_", m[, 3])
 
     cells <- tibble::as_tibble(data.table::fread(path))
