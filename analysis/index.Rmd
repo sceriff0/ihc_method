@@ -1,5 +1,5 @@
 ---
-title: "Home"
+title: "IHC method — analysis home"
 site: workflowr::wflow_site
 output:
   workflowr::wflow_html:
@@ -8,4 +8,49 @@ editor_options:
   chunk_output_type: console
 ---
 
-Welcome to my research website.
+This site collects the reproducible analyses behind the IHC method study —
+spatial single-cell IHC, bulk RNA-seq, cell-type deconvolution, clinical data,
+and the image-registration / segmentation benchmarks that validate the pipeline.
+
+Each analysis below is a standalone page. Start with the **Overview**, then dive
+into whichever thread you need. Pages marked _(in progress)_ are authored but not
+yet knit to HTML, so their links may not resolve until the next site build.
+
+## Start here
+
+- [Overview](overview.html) — project scope, the datasets in play, and how the
+  pieces fit together.
+
+## Method validation & QC
+
+The core "method" contribution: how cells are assigned to tumour annotations,
+how IHC markers are quality-controlled, and how the imaging pipeline is benchmarked.
+
+- [Annotation membership QC](annotation_membership_qc.html) _(in progress)_ —
+  sf point-in-polygon membership vs. the `Out_of_annotation` flag, compared per cell.
+- [IHC marker QC](ihc_qc.html) _(in progress)_ — per-marker distribution and
+  bimodality checks on `ihc_data`, with no external reference.
+- [Registration accuracy](registration_accuracy.html) — accuracy of the image
+  registration used to align modalities.
+- [Pipeline benchmarks](benchmarks.html) — Mirage image-processing benchmark:
+  resource scaling, registration cost/accuracy, and segmentation-method
+  comparison from the SLURM sweep.
+
+## Molecular & clinical analyses
+
+- [Clinical data](clinical_data.html) — integration of the clinical table with
+  the imaging and molecular inputs; defines tumour-annotation membership.
+- [Bulk RNA-seq](bulkRna.html) — DESeq2-based differential expression over the
+  bulk RNA inputs.
+- [Deconvolution](deconvolution.html) — cell-type deconvolution (immunedeconv),
+  bridging bulk RNA (CRF-id) and IHC (patient) id spaces via the clinical table.
+- [Marker exclusivity](exclusivity.html) _(in progress)_ — per-patient marker
+  co-expression / exclusivity from the whole-slide `ihc_data`.
+- [Tumour border / invasive margin](periphery.html) _(in progress)_ —
+  immune composition in the invasive-margin buffer around tumour annotations.
+
+## About
+
+- [About](about.html) — study and site background.
+- [License](license.html) — reuse terms for the code and results.
+- [Source code](https://github.com/sceriff0/ihc_method) — GitHub repository.
