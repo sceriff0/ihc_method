@@ -199,16 +199,19 @@ Kendall tau  = rank concordance (pairwise, best-behaved at small n)
 # `metric` selects the IHC normalization; `unit_scale` draws the x=y line and forces
 # a 0..1 square (only meaningful for tumor_over_inside — tumor_over_cd45 is unbounded
 # and pathologist is 0..1, so their scatter is judged by RANK, not the diagonal).
+# Points are coloured by `patient_id` (from cc_ann / cc_union) so a single patient's
+# annotations read as one colour — useful in the per-annotation panel where a patient
+# contributes several points.
 plot_concordance <- function(df, metric, subtitle, xlab, unit_scale = TRUE) {
   d  <- dplyr::filter(df, is.finite(.data[[metric]]), is.finite(path_frac))
   cc <- paired_cor3(d[[metric]], d$path_frac)   # Pearson + Spearman + Kendall
   p <- ggplot(d, aes(.data[[metric]], path_frac)) +
-    geom_point(alpha = 0.7, size = 2) +
+    geom_point(aes(colour = patient_id), alpha = 0.7, size = 2) +
     annotate("text", x = -Inf, y = Inf, hjust = -0.05, vjust = 1.2,
              label = sprintf("Pearson r = %.2f\nSpearman rho = %.2f\nKendall tau = %.2f\n(n = %d)",
                              cc$pearson, cc$spearman, cc$kendall, cc$n)) +
     labs(title = "Neoplastic cellularity: IHC vs pathologist", subtitle = subtitle,
-         x = xlab, y = "Pathologist tumour fraction") +
+         x = xlab, y = "Pathologist tumour fraction", colour = "Patient") +
     theme_classic(base_size = 12)
   if (unit_scale)
     p <- p + geom_abline(slope = 1, linetype = "dashed", colour = "red") +
