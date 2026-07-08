@@ -510,15 +510,15 @@ if (nrow(blood_long) > 2) {
 
 ### Induction-treatment response
 
-`ihc_immune_score` distribution grouped by `RESPONSE` (factor ordered by descending
-frequency); no summary statistic beyond the group boxplots.
+`ihc_immune_score` distribution grouped by `RESPONSE` (factor ordered by ascending
+class value, 1 -> 3); no summary statistic beyond the group boxplots.
 
 ```{r response}
 if ("RESPONSE" %in% names(ihc_clin)) {
   df <- ihc_clin |>
     filter(!is.na(RESPONSE), is.finite(ihc_immune_score))
   df$RESPONSE <- factor(as.character(df$RESPONSE),
-                        levels = names(sort(table(df$RESPONSE), decreasing = TRUE)))
+                        levels = as.character(sort(unique(as.numeric(as.character(df$RESPONSE))))))
   if (dplyr::n_distinct(df$RESPONSE) > 1 && nrow(df) > 3) {
     ggplot(df, aes(RESPONSE, ihc_immune_score, colour = RESPONSE)) +
       geom_boxplot(outlier.shape = NA) +
