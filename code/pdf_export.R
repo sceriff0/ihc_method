@@ -20,6 +20,13 @@
 # sourced from any analysis, including ones that do not load validation_helpers.
 # =============================================================================
 
+# Headless machines (e.g. HPC cluster nodes with no X server) cannot start the
+# default X11-based png() device — knitr then fails with "unable to start device
+# PNG". Route bitmap output through cairo, which needs no X11, whenever cairo is
+# compiled in. Runs on source(), i.e. in the setup chunk before any plot, and
+# only touches png()/jpeg() — pdf() is unaffected. No-op where cairo is absent.
+if (isTRUE(capabilities("cairo"))) options(bitmapType = "cairo")
+
 export_pdf_figures <- function(slug, out_root = here::here("output", "figures")) {
   tryCatch({
     fp <- knitr::opts_chunk$get("fig.path")   # e.g. "figure/clinical_data.Rmd/"
