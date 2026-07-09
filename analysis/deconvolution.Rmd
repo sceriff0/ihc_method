@@ -24,10 +24,12 @@ suppressPackageStartupMessages({
 })
 
 knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE,
-                      fig.width = 9, fig.height = 6)
+                      fig.width = 9, fig.height = 6,
+                      dev = c("png", "pdf"))   # PNG for the site, PDF exported to output/
 
 invisible(capture.output(suppressMessages(source(here("code", "test.R")))))
 source(here("code", "validation_helpers.R"))
+source(here("code", "pdf_export.R"))          # export_pdf_figures(): plots -> output/figures/
 ```
 
 ## Starting data and notation
@@ -475,3 +477,10 @@ if (!is.null(agr) && nrow(agr) > 0) {
 - The CIBERSORT and BayesPrism blocks are scaffolds — verify `set_cibersort_*()`
   and `omnideconv::build_model()/deconvolute()` argument names against your
   installed versions before trusting their output.
+
+```{r export-pdfs, include=FALSE}
+# Copy every plot from this analysis (each rendered as a PDF via the
+# dev = c("png", "pdf") chunk option) into output/figures/deconvolution/. Runs last so
+# that all figures from the chunks above already exist on disk.
+export_pdf_figures("deconvolution")
+```

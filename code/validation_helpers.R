@@ -307,21 +307,39 @@ region_ratios <- function(cells) {
     dplyr::left_join(tibble::tibble(phenotype_clean = cells$phenotype_clean),
                      phenotype_lineage, by = "phenotype_clean")$lineage else character(0)
   is_nk    <- if (n_inside) lin == "NK" else logical(0)
+  # "Clean" cell set = cells inside the region that FlowPath did NOT flag as an
+  # Outlier and that carry a real phenotype (drop the "Unknown" label). The
+  # `Outlier` column is the raw FlowPath boolean (is_pos() accepts TRUE/"true"/
+  # "1"/"yes"/"+"); if an export lacks the column, no cell is treated as an
+  # outlier (degrades to "all cells inside", matching marker_pos()'s convention).
+  is_out     <- if (n_inside && "Outlier" %in% names(cells)) is_pos(cells$Outlier)
+                else rep(FALSE, n_inside)
+  is_unknown <- if (n_inside) tidyr::replace_na(cells$phenotype_clean == "Unknown", FALSE)
+                else logical(0)
+  keep_clean <- if (n_inside) !is_out & !is_unknown else logical(0)
   n_tumor  <- sum(is_tumor, na.rm = TRUE)
   n_cd45   <- sum(is_cd45,  na.rm = TRUE)
   n_nk     <- sum(is_nk,    na.rm = TRUE)
   n_cd3cd45 <- sum(is_cd45 & is_cd3, na.rm = TRUE)   # CD45+ AND CD3+ (marker T cells)
   n_gzmb_nk <- sum(is_nk  & is_gzmb, na.rm = TRUE)   # NK lineage AND GZMB+
+  n_inside_clean <- sum(keep_clean, na.rm = TRUE)              # cells minus outliers/Unknown
+  n_tumor_clean  <- sum(is_tumor & keep_clean, na.rm = TRUE)   # tumour cells in that clean set
   ncount   <- function(l) sum(lin == l, na.rm = TRUE)
   safe     <- function(num, den) if (den > 0) num / den else NA_real_
 
   out <- tibble::tibble(
     n_inside          = n_inside,
+    n_inside_clean    = n_inside_clean,
     n_tumor_inside    = n_tumor,
+    n_tumor_clean     = n_tumor_clean,
     n_cd45_inside     = n_cd45,
     n_cd3cd45_inside  = n_cd3cd45,
     n_gzmb_nk_inside  = n_gzmb_nk,
     tumor_over_inside = safe(n_tumor, n_inside),
+    # Same tumour fraction, but over the "clean" denominator (Outlier-flagged and
+    # Unknown-phenotype cells removed from both numerator and denominator), so it
+    # stays a proper 0..1 fraction comparable to the pathologist score.
+    tumor_over_inside_clean = safe(n_tumor_clean, n_inside_clean),
     cd45_over_inside  = safe(n_cd45,  n_inside),
     tumor_over_cd45   = safe(n_tumor, n_cd45),  # tumour cells per CD45+ cell inside
     # CD3+CD45+ T cells: as a share of all cells, and of the CD45+ compartment.

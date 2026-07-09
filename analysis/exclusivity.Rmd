@@ -14,10 +14,12 @@ suppressPackageStartupMessages({
 })
 
 knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE,
-                      fig.width = 9, fig.height = 6)
+                      fig.width = 9, fig.height = 6,
+                      dev = c("png", "pdf"))   # PNG for the site, PDF exported to output/
 
 invisible(capture.output(suppressMessages(source(here("code", "test.R")))))
 source(here("code", "validation_helpers.R"))
+source(here("code", "pdf_export.R"))          # export_pdf_figures(): plots -> output/figures/
 theme_set(theme_paper)   # house style (mirage benchmarks)
 CAP <- "ihc_method internal QC · lineage leakage & exclusivity"
 ```
@@ -243,3 +245,10 @@ phenotype) and CD8/FOXP3 (the `CD8+ T reg` phenotype).
   cohort-wide, whereas leakage and the heatmap are per patient.
 - Leakage membership uses `phenotype_clean` text and the literal immune-phenotype
   list, not the `phenotype_lineage` collapse.
+
+```{r export-pdfs, include=FALSE}
+# Copy every plot from this analysis (each rendered as a PDF via the
+# dev = c("png", "pdf") chunk option) into output/figures/exclusivity/. Runs last so
+# that all figures from the chunks above already exist on disk.
+export_pdf_figures("exclusivity")
+```

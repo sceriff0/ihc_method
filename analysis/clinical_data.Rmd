@@ -15,12 +15,14 @@ suppressPackageStartupMessages({
 })
 
 knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE,
-                      fig.width = 9, fig.height = 6)
+                      fig.width = 9, fig.height = 6,
+                      dev = c("png", "pdf"))   # PNG for the site, PDF exported to output/
 
 # Loaders (dds, clinical_data, neoplastic_data, counts_data, ihc_data) and the
 # shared validation helpers. test.R prints colnames() on load; silence it.
 invisible(capture.output(suppressMessages(source(here("code", "test.R")))))
 source(here("code", "validation_helpers.R"))
+source(here("code", "pdf_export.R"))          # export_pdf_figures(): plots -> output/figures/
 ```
 
 ## Starting data and notation
@@ -71,14 +73,18 @@ cells), `region_ratios()` returns:
 
 ```
 n_inside          = number of cells in the set
+n_inside_clean    = cells in the set after dropping Outlier == TRUE and
+                    Unknown-phenotype cells (QC-filtered denominator)
 n_tumor_inside    = tumour cells in the set
+n_tumor_clean     = tumour cells in the set that survive the same clean filter
 n_cd45_inside     = CD45+ cells in the set
 n_cd3cd45_inside  = CD45+ AND CD3+ cells (marker-gated T cells)
 n_gzmb_nk_inside  = NK-lineage cells that are GZMB+ (cytotoxic/activated NK)
 n_<lineage>       = cells in the set with that lineage
                     (lineage in: CD8T, CD4T, Treg, NK, Immune_other, Stroma)
 
-tumor_over_inside   = n_tumor_inside   / n_inside
+tumor_over_inside       = n_tumor_inside / n_inside
+tumor_over_inside_clean = n_tumor_clean  / n_inside_clean  (outliers + Unknown removed)
 cd45_over_inside    = n_cd45_inside    / n_inside
 cd3cd45_over_inside = n_cd3cd45_inside / n_inside
 cd3cd45_over_cd45   = n_cd3cd45_inside / n_cd45_inside   (T cells among immune)
@@ -113,18 +119,29 @@ if (length(missing))
 
 ## Tumour content — IHC vs pathologist
 
-The IHC tumour metric is shown under **two normalizations**, both restricted to the
+The IHC tumour metric is shown under **three normalizations**, all restricted to the
 cells inside the annotation:
 
 ```
-tumor_over_inside  = (tumour cells inside) / (all cells inside)      -> 0..1
-tumor_over_cd45    = (tumour cells inside) / (CD45+ cells inside)    -> can exceed 1
-dens_tumor_per_mm2 = (tumour cells inside) / (annotation area in mm^2)   [geojson patients only]
-                     area_mm2 = polygon pixel area * 0.325^2 / 1e6
+tumor_over_inside       = (tumour cells inside) / (all cells inside)     -> 0..1
+tumor_over_inside_clean = (tumour cells inside) / (cells inside)  -> 0..1
+                          with the cell set first cleaned: FlowPath Outlier == TRUE
+                          cells and Unknown-phenotype cells dropped from BOTH the
+                          numerator and the denominator (a QC-filtered version of
+                          tumor_over_inside; if a csv has no `Outlier` column no cell
+                          is treated as an outlier)
+tumor_over_cd45         = (tumour cells inside) / (CD45+ cells inside)   -> can exceed 1
+dens_tumor_per_mm2      = (tumour cells inside) / (annotation area in mm^2)  [geojson patients only]
+                          area_mm2 = polygon pixel area * 0.325^2 / 1e6
 
 pathologist (per annotation) = ANNOTATION_k / 100
 pathologist (union)          = mean of that patient's ANNOTATION_k / 100 values
 ```
+
+`tumor_over_inside_clean` answers the same IHC-vs-pathologist question as
+`tumor_over_inside` but removes debris/segmentation outliers and unclassified cells
+that dilute the denominator, so it is expected to track the pathologist's tumour
+fraction more closely.
 
 `dens_tumor_per_mm2` is the same tumour-cell density (cells/mm²) that periphery
 reports, computed here inside the whole annotation. It needs the polygon area, so it
@@ -220,9 +237,10 @@ plot_concordance <- function(df, metric, subtitle, xlab, unit_scale = TRUE) {
 }
 
 norm_specs <- list(
-  list(metric = "tumor_over_inside",  xlab = "IHC tumour / all cells inside",  unit = TRUE),
-  list(metric = "tumor_over_cd45",    xlab = "IHC tumour / CD45+ cells inside", unit = FALSE),
-  list(metric = "dens_tumor_per_mm2", xlab = "IHC tumour density (cells / mm²) inside", unit = FALSE)
+  list(metric = "tumor_over_inside",       xlab = "IHC tumour / all cells inside",  unit = TRUE),
+  list(metric = "tumor_over_inside_clean", xlab = "IHC tumour / cells inside (excl. outliers + Unknown)", unit = TRUE),
+  list(metric = "tumor_over_cd45",         xlab = "IHC tumour / CD45+ cells inside", unit = FALSE),
+  list(metric = "dens_tumor_per_mm2",      xlab = "IHC tumour density (cells / mm²) inside", unit = FALSE)
 )
 
 for (s in norm_specs) {
@@ -608,3 +626,10 @@ invisible(purrr::iwalk(surv_cfg, ~ run_survival(.x, .y)))
   cells with a non-`NA` sign, not necessarily every cell of the patient.
 - Cohorts are small; every correlation is Spearman with its `n` reported. Read
   associations as descriptive.
+
+```{r export-pdfs, include=FALSE}
+# Copy every plot from this analysis (each rendered as a PDF via the
+# dev = c("png", "pdf") chunk option) into output/figures/clinical_data/. Runs last so
+# that all figures from the chunks above already exist on disk.
+export_pdf_figures("clinical_data")
+```

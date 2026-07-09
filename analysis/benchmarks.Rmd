@@ -14,7 +14,9 @@ suppressPackageStartupMessages({
   library(tidyverse)
   library(here)
 })
-knitr::opts_chunk$set(echo = FALSE, message = FALSE, warning = FALSE)
+knitr::opts_chunk$set(echo = FALSE, message = FALSE, warning = FALSE,
+                      dev = c("png", "pdf"))   # PNG for the site, PDF exported to output/
+source(here("code", "pdf_export.R"))          # export_pdf_figures(): plots -> output/figures/
 
 bench_dir  <- here("data", "benchmark")
 have_bench <- file.exists(file.path(bench_dir, "measurements.csv"))
@@ -240,3 +242,10 @@ if (length(bench_figs)) {
 - Any figure whose optional CSV (or required column) is missing is silently
   skipped; the rendered set depends on which sweep outputs were dropped into
   `data/benchmark/`.
+
+```{r export-pdfs, include=FALSE}
+# Copy every plot from this analysis (each rendered as a PDF via the
+# dev = c("png", "pdf") chunk option) into output/figures/benchmarks/. Runs last so
+# that all figures from the chunks above already exist on disk.
+export_pdf_figures("benchmarks")
+```

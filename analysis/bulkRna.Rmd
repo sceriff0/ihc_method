@@ -15,10 +15,12 @@ suppressPackageStartupMessages({
 })
 
 knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE,
-                      fig.width = 9, fig.height = 6)
+                      fig.width = 9, fig.height = 6,
+                      dev = c("png", "pdf"))   # PNG for the site, PDF exported to output/
 
 invisible(capture.output(suppressMessages(source(here("code", "test.R")))))
 source(here("code", "validation_helpers.R"))
+source(here("code", "pdf_export.R"))          # export_pdf_figures(): plots -> output/figures/
 ```
 
 ## Starting data and notation
@@ -224,3 +226,10 @@ if (nrow(paired_z) > 0) {
   `PDL1` -> `CD274`, `PD1` -> `PDCD1`, `FSP1` -> `S100A4`. `wrongL1CAM` is
   excluded by construction (not in `marker_gene_map`).
 - Correlations are cross-patient and small-n; every row carries its `n`.
+
+```{r export-pdfs, include=FALSE}
+# Copy every plot from this analysis (each rendered as a PDF via the
+# dev = c("png", "pdf") chunk option) into output/figures/bulkRna/. Runs last so
+# that all figures from the chunks above already exist on disk.
+export_pdf_figures("bulkRna")
+```
