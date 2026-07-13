@@ -4,8 +4,8 @@
 # Faithful copy of ../mirage (benchmarking branch) benchmarks/analysis/plots.R,
 # adapted for this project's benchmarks.Rmd with only two changes:
 #   1. default `adir` reads from data/benchmark/  (drop the sweep CSVs there)
-#   2. save_fig writes a PNG only (no cairo_pdf dependency); benchmarks.Rmd
-#      embeds the PNGs from data/benchmark/figures_R/.
+#   2. save_fig collects each ggplot into the in-memory `bench_figs` list (no
+#      files on disk); benchmarks.Rmd sources this file and renders them inline.
 # Everything else is mirage's logic. Re-vendor from mirage when their plots evolve.
 #
 #   measurements.csv  one row per (run x PROCESS): peak_rss_gb, peak_vmem_gb,
@@ -433,4 +433,4 @@ if (!is.null(qual) && "reg_tre_median_px" %in% names(qual) && "reg_distributed_t
   }
 }
 
-message("Wrote figures to ", normalizePath(outdir))
+message("Built ", length(bench_figs), " figure(s) from ", normalizePath(adir))
