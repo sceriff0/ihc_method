@@ -48,7 +48,7 @@ process_patient <- function(csv_path) {
 }
 
 load_ihc_data <- function() {
-  csv_paths    <- dir_ls("~/ihc_method/data/flowpath", glob = "*.csv")  # top level only; skips old/
+  csv_paths    <- dir_ls(here("data", "flowpath"), glob = "*.csv")  # top level only; skips old/
   safe_process <- possibly(process_patient, otherwise = NULL, quiet = FALSE)
   map(csv_paths, safe_process) |> list_rbind()
 }

@@ -27,7 +27,7 @@ source(here("code", "validation_helpers.R"))
 Every value below is derived from two inputs, compared **per cell**:
 
 - `<patient>_a<k>.csv` — FlowPath per-annotation cell exports (one row per cell)
-  under `~/ihc_method/data/flowpath/per_annotation`, carrying **both** the cell
+  under the project's `data/flowpath/per_annotation`, carrying **both** the cell
   `centroid` and the precomputed `Out_of_annotation` flag for the same cells. Only
   some patients have these.
 - the pathologist annotation **geojson** polygons (`ANNOTATION_k`, in pixels),
@@ -54,7 +54,7 @@ slide** — sf is landing on the wrong cells.
 
 ```{r qc}
 # per-annotation flag csvs (only some patients have these); matches test.R's path style.
-PER_ANNOT_DIR <- path.expand("~/ihc_method/data/flowpath/per_annotation")
+PER_ANNOT_DIR <- here("data", "flowpath", "per_annotation")
 
 annots <- load_annotations(patient_ids = neoplastic_data$SAMPLE)
 
