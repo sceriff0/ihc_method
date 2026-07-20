@@ -77,6 +77,15 @@ PATH_AGG_LABELS <- c(
   sum(x[ok] * w[ok]) / sum(w[ok])
 }
 
+# Apply a summary function over the finite values only, returning NA (never NaN or
+# +/-Inf) when there are none — so an unscored patient yields a clean NA instead of a
+# warning plus an infinite value that later has to be scrubbed.
+.finite_stat <- function(x, f) {
+  x <- x[is.finite(x)]
+  if (!length(x)) return(NA_real_)
+  as.numeric(f(x))
+}
+
 # ---------------------------------------------------------------------------
 # IHC side: one value per (patient, aggregator) for one metric.
 #   pooled      taken from the union frame (cells pooled and deduped, then the ratio
@@ -137,16 +146,16 @@ aggregate_pathologist <- function(path_long, per_ann, metric) {
   path_long |>
     dplyr::group_by(patient_id) |>
     dplyr::summarise(
+      # Reduced over the FINITE values explicitly rather than with na.rm: max()/min()
+      # of an all-NA vector warn and return -Inf/+Inf, and a warning on every knit of
+      # a patient with no usable score is noise that hides the real ones.
       n_path = sum(is.finite(path_frac)),
-      mean   = mean(path_frac,          na.rm = TRUE),
-      median = stats::median(path_frac, na.rm = TRUE),
-      max    = max(path_frac,           na.rm = TRUE),
-      min    = min(path_frac,           na.rm = TRUE),
+      mean   = .finite_stat(path_frac, mean),
+      median = .finite_stat(path_frac, stats::median),
+      max    = .finite_stat(path_frac, max),
+      min    = .finite_stat(path_frac, min),
       .groups = "drop"
     ) |>
-    # max()/min() of an all-NA vector warn and return +/-Inf; normalise to NA.
-    dplyr::mutate(dplyr::across(c(mean, median, max, min),
-                                ~ dplyr::if_else(is.finite(.x), .x, NA_real_))) |>
     dplyr::left_join(weighted, by = "patient_id") |>
     tidyr::pivot_longer(dplyr::any_of(names(PATH_AGG_LABELS)),
                         names_to = "path_agg", values_to = "path_frac")
@@ -185,7 +194,17 @@ aggregation_grid <- function(per_ann, union, path_long,
         dplyr::mutate(metric = the_metric, ihc_agg = ia, path_agg = pa, .before = 1)
     })
   })
-  if (nrow(pairs) == 0) return(list(pairs = pairs, stats = tibble::tibble()))
+  # An empty map_dfr() result has NO COLUMNS, so a downstream filter(pairs, metric
+  # == ...) would fail with "object 'metric' not found" rather than drawing nothing.
+  # Always hand back a correctly-TYPED empty frame instead.
+  if (nrow(pairs) == 0)
+    return(list(
+      pairs = tibble::tibble(metric = character(), ihc_agg = character(),
+                             path_agg = character(), patient_id = character(),
+                             ihc_val = numeric(), path_frac = numeric(),
+                             ihc_lab = factor(), path_lab = factor()),
+      stats = tibble::tibble()
+    ))
 
   stats <- pairs |>
     dplyr::group_by(metric, ihc_agg, path_agg) |>
@@ -241,6 +260,10 @@ plot_aggregation_grid <- function(pairs, which_metric, title = NULL) {
   # `metric` is a COLUMN of `pairs`, so the argument is deliberately named
   # differently — `filter(pairs, metric == metric)` would be a tautology matching
   # every row and silently overlay all metrics in one panel.
+  # Defensive on BOTH counts: a caller may hand over a frame that never got the
+  # `metric` column (an empty grid), and filtering on a missing column errors rather
+  # than returning nothing. Draw nothing instead of aborting the knit.
+  if (!all(c("metric", "ihc_lab", "path_lab") %in% names(pairs))) return(invisible())
   d <- dplyr::filter(pairs, metric == which_metric)
   if (nrow(d) == 0) return(invisible())
 
@@ -254,8 +277,12 @@ plot_aggregation_grid <- function(pairs, which_metric, title = NULL) {
 
   ggplot(d, aes(ihc_val, path_frac)) +
     # Shading FIRST: a later geom_rect would paint over the x = y line and the points.
+    # The bounds are fixed PARAMETERS, not aesthetics — mapping constants through
+    # aes() makes ggplot warn that a length-1 aesthetic is being recycled over the
+    # data's rows. One rect is still drawn per row, each landing in its own facet
+    # because `rho` carries the facet columns.
     geom_rect(data = dplyr::filter(rho, matched),
-              aes(xmin = -Inf, xmax = Inf, ymin = -Inf, ymax = Inf),
+              xmin = -Inf, xmax = Inf, ymin = -Inf, ymax = Inf,
               fill = "grey92", inherit.aes = FALSE) +
     geom_abline(slope = 1, linetype = "dashed", colour = "red") +
     geom_point(aes(colour = patient_id), alpha = 0.8, size = 2) +
@@ -263,7 +290,7 @@ plot_aggregation_grid <- function(pairs, which_metric, title = NULL) {
               hjust = -0.05, vjust = 1.3, size = 2.7, inherit.aes = FALSE) +
     facet_grid(ihc_lab ~ path_lab, labeller = label_wrap_gen(18)) +
     coord_equal(xlim = c(0, 1), ylim = c(0, 1)) +
-    labs(title = title %||% paste0("Aggregation sensitivity: ", metric),
+    labs(title = title %||% paste0("Aggregation sensitivity: ", which_metric),
          subtitle = paste("shaded panels weight both sides the same way;",
                           "dashed line is x = y"),
          x = "IHC tumour fraction (aggregated per patient)",
@@ -304,6 +331,8 @@ plot_aggregation_heatmap <- function(stats, stat = "spearman") {
 # annotation has spread 0 by construction; large spreads identify the patients whose
 # annotations disagree most, which is where the aggregation choice actually bites.
 aggregation_spread <- function(pairs) {
+  if (!all(c("metric", "ihc_val", "path_frac") %in% names(pairs)) || nrow(pairs) == 0)
+    return(tibble::tibble())
   pairs |>
     dplyr::group_by(metric, patient_id) |>
     dplyr::summarise(
