@@ -25,6 +25,7 @@ knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE,
 # patients that have no per-annotation csv.
 invisible(capture.output(suppressMessages(source(here("code", "test.R")))))
 source(here("code", "validation_helpers.R"))
+source(here("code", "aggregation_compare.R"))  # annotation-aggregation sensitivity grid
 source(here("code", "per_annotation_flag.R"))  # per-annotation flag loader + metrics
 source(here("code", "pdf_export.R"))          # export_pdf_figures(): plots -> output/figures/
 ```
@@ -348,6 +349,173 @@ for (s in norm_specs)
   plot_bland_altman(cc_union, s$metric,
                     paste0("Bland–Altman (union): ", s$metric, " − pathologist"))
 ```
+
+## Aggregation strategy — how collapsing the annotations moves the answer
+
+The concordance panels above compare neoplastic cellularity at two fixed levels:
+**per annotation** (one point per `ANNOTATION_k`) and **union** (one point per
+patient). The union level hides a choice, because a patient with several annotations
+has several IHC values *and* several pathologist values, and each side has to be
+collapsed to one number before they can be paired. That collapse is not neutral.
+
+**The mismatch this section exists to expose.** The union pair above collapses the
+two sides by *different* rules:
+
+```
+pathologist   path_union      = mean(ANNOTATION_k / 100)          UNWEIGHTED mean
+IHC           ihc_tumor_union = tumour cells / all cells,
+                                over the POOLED cells of every
+                                annotation of that patient        CELL-WEIGHTED mean
+```
+
+For a patient whose annotations differ in size these are different summaries of the
+same slide. Take two annotations, 40 000 cells at 80% tumour and 4 000 cells at 50%:
+the cell-weighted IHC value is 0.77 while the unweighted pathologist value is 0.65.
+That 0.12 gap is **aggregation artefact**, not IHC-vs-pathologist disagreement — and
+the existing union panels cannot tell the two apart.
+
+So below, every IHC aggregator is paired against every pathologist aggregator:
+
+```
+IHC side (per patient)
+  pooled      cells of every annotation pooled and deduped, ratio recomputed
+              (exactly what the union panels above use)          cell-weighted
+  wmean_ann   per-annotation fractions averaged, weights = that annotation's
+              cell count                                          cell-weighted
+  mean_ann    per-annotation fractions averaged, every annotation equal
+  median_ann  median of the per-annotation fractions (only differs from mean_ann
+              at 3+ annotations)
+
+pathologist side (per patient)
+  wmean_cells ANNOTATION_k scores averaged, weights = that annotation's IHC cell
+              count — the pathologist analogue of pooling cells   cell-weighted
+  mean        plain mean over the patient's annotations (used by the union panels)
+  median      median over the annotations
+  max         the highest-scoring annotation ("worst area governs")
+  min         the lowest-scoring annotation (most conservative)
+```
+
+The weight is always the denominator of the metric being aggregated: `n_inside` for
+`tumor_over_inside`, `n_inside_clean` for `tumor_over_inside_clean`. Weighting a
+clean-set metric by the unclean count would over-weight annotations whose cells were
+mostly discarded as outliers or Unknown.
+
+One consequence to watch in the tables: a patient whose IHC region is labelled
+`"csv"` rather than an `ANNOTATION_k` cannot be matched to a per-annotation
+pathologist score, so it contributes no weight and drops out of the `wmean_cells`
+rows while still appearing in the `mean` / `median` / `max` / `min` ones. That is why
+`n` is printed on every row of the grid — compare rows only at equal `n`.
+
+**Only two of the twenty combinations weight both sides the same way** —
+`(pooled, wmean_cells)` and `(mean_ann, mean)`. Those are the pairs whose gap is
+interpretable as genuine disagreement; everywhere else part of the gap is the
+aggregation mismatch. They are shaded in the scatter grids and boxed in the heatmap.
+
+**A built-in check.** `wmean_ann` should reproduce `pooled` almost exactly, since
+pooling cells *is* cell-weighting them. The only thing separating those two rows is
+the union's dedup of cells falling inside two overlapping annotations — so a visible
+gap between them is a measurement of **annotation overlap**, not an aggregation
+error. Read those two rows against each other before trusting anything else here.
+
+```{r aggregation-grid}
+# Every IHC aggregator x every pathologist aggregator, for both tumour-fraction
+# normalizations. $pairs = the per-patient points; $stats = paired_cor3 + bias per
+# combination. `bias` = mean(IHC - pathologist): the systematic offset that the
+# correlation coefficients are deliberately blind to (a method can correlate
+# perfectly and still read 15 points high).
+agg      <- aggregation_grid(ihc_tumor_per_ann, ihc_tumor_union, path_long)
+baseline <- per_annotation_baseline(ihc_tumor_per_ann, path_long)
+
+agg$stats |>
+  transmute(metric, ihc = ihc_lab, pathologist = path_lab,
+            matched = if_else(matched, "yes", ""),
+            n, pearson = round(pearson, 2), spearman = round(spearman, 2),
+            kendall = round(kendall, 2), bias = round(bias, 3)) |>
+  knitr::kable(caption = paste(
+    "Aggregation grid, best Spearman first within each metric.",
+    "matched = both sides weighted the same way (the interpretable rows).",
+    "bias = mean(IHC - pathologist)."))
+
+baseline |>
+  transmute(metric, n, pearson = round(pearson, 2), spearman = round(spearman, 2),
+            kendall = round(kendall, 2), bias = round(bias, 3)) |>
+  knitr::kable(caption = paste(
+    "PER-ANNOTATION baseline: no aggregation at all, one point per",
+    "(patient, annotation). The reference the aggregated rows above should be read",
+    "against — it neither gains aggregation's smoothing nor loses the",
+    "within-patient signal."))
+```
+
+**Read the correlations with the `n` beside them.** This cohort gives a handful of
+patients, so a Spearman rho here has a confidence interval spanning most of the
+range, and the *ranking* of the twenty combinations is far less stable than the
+numbers suggest. The point of the grid is not to pick the winner by rho — that would
+be selecting on noise — but to see **whether the choice matters at all**. A flat grid
+means the conclusion is robust to the aggregation; a grid with a large spread means
+any single reported correlation is partly an artefact of the collapse rule.
+
+```{r aggregation-heatmap, fig.width=8, fig.height=8}
+# Reading a ROW shows how much the pathologist aggregator matters; a COLUMN, how much
+# the IHC one does. Flat = the choice is immaterial for this cohort (the hoped-for
+# outcome). Boxed cells are the matched-weighting pairs.
+plot_aggregation_heatmap(agg$stats, "spearman")
+```
+
+```{r aggregation-scatter-raw, fig.width=11, fig.height=9}
+# tumour / all cells inside. Dashed line is x = y; vertical distance from it is the
+# disagreement. Shaded panels weight both sides the same way.
+plot_aggregation_grid(agg$pairs, "tumor_over_inside")
+```
+
+```{r aggregation-scatter-clean, fig.width=11, fig.height=9}
+# tumour / cells inside, with FlowPath Outlier == TRUE and Unknown-phenotype cells
+# removed from both numerator and denominator.
+plot_aggregation_grid(agg$pairs, "tumor_over_inside_clean")
+```
+
+Finally, which patients the choice actually bites on. A patient with one annotation
+has zero spread by construction; the spread is the range a patient's value takes
+across the aggregators, so large spreads mark the patients whose annotations
+disagree most internally.
+
+```{r aggregation-spread}
+aggregation_spread(agg$pairs) |>
+  transmute(metric, patient_id, n_pairs,
+            ihc_min = round(ihc_min, 3), ihc_max = round(ihc_max, 3),
+            ihc_spread = round(ihc_spread, 3),
+            path_min = round(path_min, 3), path_max = round(path_max, 3),
+            path_spread = round(path_spread, 3)) |>
+  knitr::kable(caption = paste(
+    "Per-patient spread across the aggregators (largest IHC spread first).",
+    "Spread 0 = a single-annotation patient, where every aggregator coincides."))
+```
+
+### Recommendation
+
+**For method validation, prefer the per-annotation level over any aggregation.** The
+pathologist reports one score per annotation, so the annotation — not the patient —
+is the natural unit at which the two methods can be compared like for like. It also
+uses every observation instead of averaging most of them away, which matters at this
+sample size. Aggregation is a compromise made necessary by the *clinical* joins
+(survival, response, blood counts), which are per patient.
+
+**When a patient-level number is required, use a matched pair.** Reporting a
+cell-weighted IHC value against an unweighted pathologist value — what the union
+panels currently do — mixes a real effect with an artefact. Of the two matched
+options:
+
+- `(mean_ann, mean)` — treats each annotation as one observation on both sides.
+  Preferred as the primary: it mirrors how the pathologist's own numbers are
+  produced (a per-region score, not a cell census), and one very large annotation
+  cannot dominate the patient's value.
+- `(pooled, wmean_cells)` — treats the patient's tissue as a single specimen and
+  asks what fraction of its cells are neoplastic. Report alongside as the
+  sensitivity analysis. It is the more natural quantity if the annotations are
+  arbitrary subdivisions of one tumour rather than distinct regions.
+
+If those two disagree materially, the disagreement is itself the finding: it means
+the patient's annotations are heterogeneous in both size and tumour content, and no
+single patient-level number represents that slide well.
 
 ## Immune infiltrate — IHC vs clinical immune phenotype
 
