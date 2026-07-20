@@ -1,7 +1,7 @@
 ---
-title: "clinical_data (per-annotation flag)"
+title: "clinical_data (per-annotation flag, old/ overlay)"
 author: "sceriff0"
-date: "2026-07-13"
+date: "2026-07-20"
 output: workflowr::wflow_html
 editor_options:
   chunk_output_type: console
@@ -31,20 +31,28 @@ source(here("code", "pdf_export.R"))          # export_pdf_figures(): plots -> o
 
 ## Starting data and notation
 
-This is the **per-annotation flag** variant of `clinical_data.Rmd`: the cells and
-the tumour-membership come from the FlowPath per-annotation exports, not the
-whole-slide files + geojson. It is the **`old/`-ignoring** of the two per-annotation
-analyses — see `clinical_data_per_annotation_old.Rmd` for the variant that layers
-`per_annotation/old/` on top. Every value below is derived from three inputs:
+This is the **per-annotation flag, `old/`-overlay** variant of `clinical_data.Rmd`:
+the cells and the tumour-membership come from the FlowPath per-annotation exports,
+not the whole-slide files + geojson. It is the counterpart of
+`clinical_data_per_annotation.Rmd`, which is identical except that it ignores
+`per_annotation/old/` entirely — so every difference between the two reports is
+attributable to the overlaid annotations alone. Every value below is derived from
+three inputs:
 
-- `ann_cells` — FlowPath single cells, one row per cell, assembled from **two**
+- `ann_cells` — FlowPath single cells, one row per cell, assembled from **three**
   places by `build_flag_cells()`:
     - *primary* — the per-annotation files
       `data/flowpath/per_annotation/<patient>_a<k>.csv` (**one csv per (patient,
-      annotation)**; the `old/` and `new/` subfolders are **not** read). Each file
-      carries `phenotype`, per-marker `<marker>_sign`, `centroid_x`/`y`, and the
+      annotation)**; the `new/` subfolder is not read). Each file carries
+      `phenotype`, per-marker `<marker>_sign`, `centroid_x`/`y`, and the
       precomputed `Out_of_annotation` flag for that annotation. `patient_id` = the
       stem before `_a`; `annotation` = `ANNOTATION_<k>`.
+    - *overlay* — `data/flowpath/per_annotation/old/<patient>_a<k>.csv`. Where the
+      overlay provides a `(patient, annotation)`, it **replaces** the top-level file
+      for that annotation outright: the two csvs are alternative exports of the same
+      annotation, so their cells are swapped, never pooled (pooling would
+      double-count every cell). Annotations the overlay does not mention keep their
+      top-level file untouched.
     - *fallback* — for a patient with **no** per-annotation csv at all, the
       whole-slide file `data/flowpath/<patient>.csv`. Its single
       `Out_of_annotation` flag was computed over all that patient's annotations at
@@ -145,23 +153,26 @@ Any fraction with a zero denominator is `NA`. The marker-gated subsets use
 `<marker>_sign` (`is_pos`), not the phenotype label.
 
 ```{r annotations}
-# Cells for the whole analysis: per-annotation files (top level only — old/ and new/
-# are NOT read) plus the whole-slide Out_of_annotation fallback for any patient with
-# no per-annotation csv. One long table keyed by (patient_id, annotation).
-# overlay = NULL -> ignore old/. neoplastic_data lets a fallback patient with a single
-# scored annotation be labelled with that annotation, so it reaches every panel.
-ann_cells <- build_flag_cells(ihc_data, overlay = NULL,
+# Cells for the whole analysis: per-annotation files with old/ layered OVER them
+# (old/ wins on collision), plus the whole-slide Out_of_annotation fallback for any
+# patient with no per-annotation csv. One long table keyed by (patient_id, annotation).
+# old/ overrides the top-level file. neoplastic_data lets a fallback patient with a
+# single scored annotation be labelled with that annotation, so it reaches every panel.
+ann_cells <- build_flag_cells(ihc_data, overlay = PER_ANNOT_OLD_DIR,
                               neoplastic_data = neoplastic_data)
 
 inv <- flag_cells_inventory(ann_cells)
 
 neo_ids  <- slide_key(neoplastic_data$SAMPLE)
-per_ann  <- sort(unique(inv$patient_id[inv$file_origin == "per_annotation"]))
+from_old <- inv |> filter(file_origin == "old")
+per_ann  <- sort(unique(inv$patient_id[inv$file_origin %in% c("per_annotation", "old")]))
 fallback <- sort(unique(inv$patient_id[inv$file_origin == "whole_slide"]))
 missing  <- setdiff(neo_ids, unique(inv$patient_id))  # scored, but no cells at all
 
 cat("per-annotation patients:", length(per_ann), "[", paste(per_ann, collapse = ", "), "]",
-    "across", sum(inv$file_origin == "per_annotation"), "annotation file(s)\n")
+    "across", sum(inv$file_origin %in% c("per_annotation", "old")), "annotation file(s)\n")
+cat("annotations taken from old/ (superseding the top-level file):", nrow(from_old),
+    "[", paste(paste0(from_old$patient_id, " ", from_old$annotation), collapse = "; "), "]\n")
 cat("whole-slide FALLBACK patients (no per-annotation csv):", length(fallback),
     "[", paste(fallback, collapse = ", "), "]\n")
 cat("patients with a pathologist score AND cells:",
@@ -171,9 +182,9 @@ if (length(missing))
       paste(sort(missing), collapse = ", "), "\n")
 
 knitr::kable(inv, caption = paste(
-  "Cell inventory. file_origin = per_annotation (a <patient>_a<k>.csv) or",
-  "whole_slide (the fallback <patient>.csv, annotation \"csv\").",
-  "n_inside = cells with Out_of_annotation FALSE."))
+  "Cell inventory. file_origin = per_annotation (top-level <patient>_a<k>.csv),",
+  "old (that file superseded by per_annotation/old/), or whole_slide (the fallback",
+  "<patient>.csv, annotation \"csv\"). n_inside = cells with Out_of_annotation FALSE."))
 ```
 
 ## Tumour content — IHC vs pathologist
@@ -689,10 +700,11 @@ invisible(purrr::iwalk(surv_cfg, ~ run_survival(.x, .y)))
   and `csv` for fallback patients read from the whole-slide `<patient>.csv`. Check
   the inventory table above before reading any panel: a `csv` row is one region for
   the whole slide, not a single pathologist annotation.
-- The `old/` subfolder is **ignored** by this analysis. The companion
-  `clinical_data_per_annotation_old.Rmd` is identical except that it layers
-  `per_annotation/old/` over the top-level files, so differences between the two
-  reports are attributable to those re-exported annotations alone.
+- The `old/` subfolder **overrides** the top-level file for every `(patient,
+  annotation)` it provides — see the `file_origin == "old"` rows of the inventory
+  table for exactly which. The companion `clinical_data_per_annotation.Rmd` is
+  identical except that it ignores `old/`, so differences between the two reports
+  are attributable to those re-exported annotations alone.
 - A fallback patient has ONE region, not a per-annotation breakdown. It is labelled
   with the patient's sole scored annotation when it has exactly one — so all six
   patients reach every panel — and `"csv"` (union panels only, with a warning) when
@@ -705,7 +717,7 @@ invisible(purrr::iwalk(surv_cfg, ~ run_survival(.x, .y)))
 
 ```{r export-pdfs, include=FALSE}
 # Copy every plot from this analysis (each rendered as a PDF via the
-# dev = c("png", "pdf") chunk option) into output/figures/clinical_data_per_annotation/.
+# dev = c("png", "pdf") chunk option) into output/figures/clinical_data_per_annotation_old/.
 # Runs last so that all figures from the chunks above already exist on disk.
-export_pdf_figures("clinical_data_per_annotation")
+export_pdf_figures("clinical_data_per_annotation_old")
 ```

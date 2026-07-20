@@ -39,7 +39,16 @@ how IHC markers are quality-controlled, and how the imaging pipeline is benchmar
 ## Molecular & clinical analyses
 
 - [Clinical data](clinical_data.html) — integration of the clinical table with
-  the imaging and molecular inputs; defines tumour-annotation membership.
+  the imaging and molecular inputs; defines tumour-annotation membership via the
+  pathologist geojson (sf point-in-polygon).
+- [Clinical data — per-annotation flag](clinical_data_per_annotation.html) — the
+  same analysis with membership taken from the FlowPath `Out_of_annotation` flag in
+  the per-annotation exports, falling back to the whole-slide csv for patients with
+  no per-annotation file. Ignores `per_annotation/old/`.
+- [Clinical data — per-annotation flag, `old/` overlay](clinical_data_per_annotation_old.html)
+  — identical to the above except that `per_annotation/old/` overrides the
+  top-level file for the annotations it re-exports, so the diff between the two
+  isolates the effect of those re-exports.
 - [Bulk RNA-seq](bulkRna.html) — DESeq2-based differential expression over the
   bulk RNA inputs.
 - [Deconvolution](deconvolution.html) — cell-type deconvolution (immunedeconv),
