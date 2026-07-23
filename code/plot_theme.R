@@ -45,18 +45,41 @@ pt_line <- function(pt) pt / 2.13          # pt -> ggplot2 `linewidth`
 pt_text <- function(pt) pt / 2.845276      # pt -> geom_text/geom_label `size`
 
 # --- font --------------------------------------------------------------------
-# Helvetica (macOS) / Arial (Windows) / Nimbus Sans (Linux Ghostscript clone) are
-# the journal-acceptable sans faces. Resolve to whichever exists and fall back to
-# "" (the device's own sans) rather than erroring — a missing font must never
-# break a knit on a cluster node. Resolved once at source() time.
-.paper_family <- local({
-  wanted <- c("Helvetica", "Arial", "Nimbus Sans", "DejaVu Sans")
-  have <- tryCatch(unique(systemfonts::system_fonts()$family),
-                   error = function(e) tryCatch(names(grDevices::postscriptFonts()),
-                                                error = function(e) character(0)))
-  hit <- wanted[wanted %in% have]
-  if (length(hit)) hit[1] else ""          # "" = device default sans
-})
+# The style calls for a humanist sans (Helvetica/Arial), and "" is how you ask for
+# it SAFELY. Do not name the font here.
+#
+# WHY. A family name has to be registered in the DEVICE's font database, not
+# merely installed on the machine. grDevices::pdf() ships the Type 1 base-14 set
+# (Helvetica, Times, Courier, ...) and knows nothing about an OS face like "Arial",
+# "Nimbus Sans" or "DejaVu Sans" — those are what systemfonts::system_fonts()
+# reports, which is a DIFFERENT database. Naming an OS-only face makes every knit
+# with `dev = c("png", "pdf")` die at the first text grob with
+#   Error in grid.Call.graphics(C_text, ...) : invalid font type
+# and the PNG (cairo) pass gives no warning of it, because cairo resolves OS fonts
+# happily. That failure mode cost a build; hence this comment.
+#
+# "" means "the device's own default family" — which IS Helvetica on pdf() and a
+# Helvetica-metric sans on cairo/ragg. Identical look, no font database to satisfy,
+# works unchanged on a headless cluster node.
+#
+# To force a specific face (a journal insisting on Arial, say): register it with
+# the device first (see ?pdfFonts / ?grDevices::Type1Font), then set
+#   options(ihc.plot.family = "Arial")
+# BEFORE sourcing this file. paper_family() validates the request against the
+# device databases and degrades to "" with a warning rather than letting a knit
+# fail three chunks in.
+paper_family <- function(family = getOption("ihc.plot.family", "")) {
+  if (!nzchar(family)) return("")
+  known <- tryCatch(unique(c(names(grDevices::pdfFonts()),
+                             names(grDevices::postscriptFonts()))),
+                    error = function(e) character(0))
+  if (family %in% known) return(family)
+  warning("plot_theme: font family ", sQuote(family), " is not registered with the ",
+          "pdf/postscript device, so it would abort any knit that renders PDFs. ",
+          "Falling back to the device default. Register it with grDevices::pdfFonts() ",
+          "first if you need it.", call. = FALSE)
+  ""
+}
 
 # --- the theme ---------------------------------------------------------------
 # Built on theme_classic() because that is the only built-in with the right
@@ -70,7 +93,7 @@ pt_text <- function(pt) pt / 2.845276      # pt -> geom_text/geom_label `size`
 #               for the rare panel (e.g. a wide dot plot) that is unreadable
 #               without one
 #   axis_lines  FALSE drops the L-shaped axis, for heatmaps/tile plots
-theme_paper <- function(base_size = 10, base_family = .paper_family,
+theme_paper <- function(base_size = 10, base_family = paper_family(),
                         grid = c("none", "y", "x", "both"), axis_lines = TRUE) {
   grid <- match.arg(grid)
   line_col <- "black"
@@ -289,9 +312,12 @@ paper_geom_defaults <- function() {
   set("bar",     list(linewidth = pt_line(0.9)))
   set("col",     list(linewidth = pt_line(0.9)))
   set("errorbar",list(linewidth = pt_line(0.75)))
-  # in-panel annotation text at ~7pt, in the house font
-  set("text",    list(size = pt_text(7), family = .paper_family, colour = "black"))
-  set("label",   list(size = pt_text(7), family = .paper_family, colour = "black"))
+  # In-panel annotation text at ~7pt. Deliberately does NOT set `family`: these
+  # defaults feed annotate("text", ...) and geom_text() alike, and a family the pdf
+  # device cannot resolve aborts the knit there (see the font section above).
+  # Leaving it unset inherits "" = the device default, same as the theme.
+  set("text",    list(size = pt_text(7), colour = "black"))
+  set("label",   list(size = pt_text(7), colour = "black"))
   invisible(NULL)
 }
 
