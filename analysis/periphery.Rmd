@@ -142,13 +142,12 @@ if (nrow(df) > 2) {
     mutate(lab = sprintf("rho = %.2f\np = %.3g (n = %d)", rho, p, n))
   ggplot(df, aes(cd45_over_inside, hot_score)) +
     geom_point(alpha = 0.7, size = 2) +
-    geom_smooth(method = "lm", se = FALSE, colour = "steelblue", formula = y ~ x) +
+    geom_smooth(method = "lm", se = FALSE, colour = FIT_LINE, formula = y ~ x) +
     geom_text(data = labs_tbl, aes(x = -Inf, y = Inf, label = lab),
               hjust = -0.05, vjust = 1.2, inherit.aes = FALSE, size = 3) +
     facet_wrap(~ threshold_um, labeller = labeller(threshold_um = ~ paste0("d = ", .x, " µm"))) +
     labs(title = "Invasive-margin immune fraction vs clinical HOT score",
-         x = "CD45+ fraction in margin band", y = "clinical HOT score") +
-    theme_classic(base_size = 11)
+         x = "CD45+ fraction in margin band", y = "clinical HOT score")
 }
 ```
 
@@ -162,13 +161,12 @@ if (nrow(df) > 2) {
     mutate(lab = sprintf("rho = %.2f\np = %.3g (n = %d)", rho, p, n))
   ggplot(df, aes(dens_cd45_per_mm2, hot_score)) +
     geom_point(alpha = 0.7, size = 2) +
-    geom_smooth(method = "lm", se = FALSE, colour = "steelblue", formula = y ~ x) +
+    geom_smooth(method = "lm", se = FALSE, colour = FIT_LINE, formula = y ~ x) +
     geom_text(data = labs_tbl, aes(x = -Inf, y = Inf, label = lab),
               hjust = -0.05, vjust = 1.2, inherit.aes = FALSE, size = 3) +
     facet_wrap(~ threshold_um, labeller = labeller(threshold_um = ~ paste0("d = ", .x, " µm"))) +
     labs(title = "Invasive-margin immune density vs clinical HOT score",
-         x = "CD45+ per mm² in margin band", y = "clinical HOT score") +
-    theme_classic(base_size = 11)
+         x = "CD45+ per mm² in margin band", y = "clinical HOT score")
 }
 ```
 
@@ -190,7 +188,6 @@ if (dplyr::n_distinct(na.omit(df$immuno_phe)) > 1 && nrow(df) > 3) {
                         name = "Immuno-phenotype") +
     labs(title = "Invasive-margin immune fraction by clinical immuno-phenotype",
          x = NULL, y = "CD45+ fraction in margin band") +
-    theme_classic(base_size = 11) +
     theme(axis.text.x = element_text(angle = 30, hjust = 1))
 }
 ```
@@ -240,8 +237,7 @@ if (nrow(sc) > 1) {
     coord_equal() +
     labs(title = "Margin vs core CD45+ fraction (d = 500 µm)",
          x = "CD45+ fraction, deep core", y = "CD45+ fraction, invasive margin",
-         colour = "Immuno-phenotype") +
-    theme_classic(base_size = 11)
+         colour = "Immuno-phenotype")
   if ("colour" %in% names(sc) || any(!is.na(sc$immuno_phe)))
     p <- p + scale_colour_manual(values = hotcold_cols(levels(hotcold_order(sc$immuno_phe))),
                                  name = "Immuno-phenotype", na.value = "grey70")
@@ -261,7 +257,6 @@ if (dplyr::n_distinct(na.omit(df$immuno_phe)) > 1 && nrow(df) > 3) {
     scale_colour_manual(values = hotcold_cols(levels(df$immuno_phe)), name = "Immuno-phenotype") +
     labs(title = "Margin-minus-core exclusion score by clinical phenotype (d = 500 µm)",
          x = NULL, y = "exclusion score (margin − core CD45+ fraction)") +
-    theme_classic(base_size = 11) +
     theme(axis.text.x = element_text(angle = 30, hjust = 1))
 }
 ```
@@ -288,7 +283,6 @@ if (nrow(cmp) > 1) {
     geom_jitter(aes(colour = annotation), width = 0.05, size = 2, alpha = 0.85) +
     labs(title = "Margin immune fraction: single annotations vs union (d = 500 µm)",
          x = "patient", y = "CD45+ fraction in margin band", colour = "annotation") +
-    theme_classic(base_size = 11) +
     theme(axis.text.x = element_text(angle = 30, hjust = 1))
 }
 ```
@@ -324,7 +318,6 @@ if (nrow(comp) > 0) {
     scale_fill_manual(values = oi, guide = "none") +
     labs(title = "Immune composition in the invasive-margin band (d = 500 µm)",
          x = NULL, y = "fraction") +
-    theme_classic(base_size = 11) +
     theme(axis.text.x = element_text(angle = 30, hjust = 1))
 }
 ```
@@ -366,7 +359,6 @@ if (nrow(comp_hc) > 0 && dplyr::n_distinct(na.omit(comp_hc$immuno_phe)) > 1) {
          subtitle = sprintf("%d patients with a margin band and an immuno-phenotype",
                             dplyr::n_distinct(comp_hc$patient_id)),
          x = NULL, y = "fraction in margin band") +
-    theme_classic(base_size = 11) +
     theme(axis.text.x = element_text(angle = 30, hjust = 1))
 }
 ```

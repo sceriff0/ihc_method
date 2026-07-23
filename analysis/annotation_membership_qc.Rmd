@@ -15,11 +15,15 @@ suppressPackageStartupMessages({
 })
 
 knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE,
-                      fig.width = 8, fig.height = 5)
+                      fig.width = 8, fig.height = 5,
+                      dev = c("png", "pdf"))   # PNG for the site, PDF exported to output/
 
 # Loaders (gives neoplastic_data + the helpers). test.R prints colnames(); silence it.
+# validation_helpers.R also sources code/plot_theme.R, which applies the house
+# figure style (theme + palettes + geom defaults) for every plot below.
 invisible(capture.output(suppressMessages(source(here("code", "test.R")))))
 source(here("code", "validation_helpers.R"))
+source(here("code", "pdf_export.R"))          # export_pdf_figures(): plots -> output/figures/
 ```
 
 ## Starting data and notation
@@ -103,7 +107,7 @@ if (nrow(qc) && sum(is.finite(qc$tumor_frac_flag) & is.finite(qc$tumor_frac_sf))
   d  <- qc |> filter(is.finite(tumor_frac_flag), is.finite(tumor_frac_sf))
   cc <- paired_cor3(d$tumor_frac_flag, d$tumor_frac_sf)   # Pearson + Spearman + Kendall
   ggplot(d, aes(tumor_frac_flag, tumor_frac_sf, colour = patient_id)) +
-    geom_abline(slope = 1, linetype = "dashed", colour = "red") +
+    geom_abline(slope = 1, linetype = "dashed", colour = REF_LINE) +
     geom_point(size = 3, alpha = 0.85) +
     coord_equal(xlim = c(0, 1), ylim = c(0, 1)) +
     annotate("text", x = 0, y = 1, hjust = 0, vjust = 1,
@@ -111,8 +115,7 @@ if (nrow(qc) && sum(is.finite(qc$tumor_frac_flag) & is.finite(qc$tumor_frac_sf))
                              cc$pearson, cc$spearman, cc$kendall, cc$n)) +
     labs(title = "Tumour fraction inside: flag vs sf point-in-polygon",
          x = "tumour fraction (Out_of_annotation flag)",
-         y = "tumour fraction (sf / 0.325)", colour = "patient") +
-    theme_classic(base_size = 12)
+         y = "tumour fraction (sf / 0.325)", colour = "patient")
 }
 ```
 
@@ -124,4 +127,8 @@ if (nrow(qc) && sum(is.finite(qc$tumor_frac_flag) & is.finite(qc$tumor_frac_sf))
   slide with low agreement should either be excluded or given its own conversion.
 - This compares *membership*, not the pathologist — that concordance is in
   `clinical_data.Rmd`.
+
+```{r export-figures, include=FALSE}
+# Copy every PDF knitr emitted for this analysis into output/figures/<slug>/.
+export_pdf_figures("annotation_membership_qc")
 ```

@@ -20,7 +20,8 @@ knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE,
 invisible(capture.output(suppressMessages(source(here("code", "test.R")))))
 source(here("code", "validation_helpers.R"))
 source(here("code", "pdf_export.R"))          # export_pdf_figures(): plots -> output/figures/
-theme_set(theme_paper)   # house style (mirage benchmarks)
+# House figure style (theme + palettes + geom defaults) is applied by
+# code/plot_theme.R, which validation_helpers.R sources — nothing to set here.
 CAP <- "ihc_method internal QC · lineage leakage & exclusivity"
 ```
 
@@ -218,15 +219,14 @@ per_pat <- exclusivity_pairs |>
 
 if (nrow(per_pat) > 0) {
   ggplot(per_pat, aes(patient_id, pair, fill = dp)) +
-    geom_tile(colour = "white") +
-    scale_fill_viridis_c(option = "magma", direction = -1,
-                         labels = scales::percent_format(accuracy = .1),
-                         name = "double-pos\nfraction") +
+    geom_tile(colour = "white", linewidth = 0.3) +
+    scale_fill_seq(labels = scales::percent_format(accuracy = .1),
+                   name = "double-pos fraction", guide = guide_cbar()) +
     labs(title = "Marker-pair co-positivity per patient",
          subtitle = "Bright = high double-positive rate = likely spillover in that patient.",
          x = "patient", y = NULL, caption = CAP) +
-    theme(axis.text.x = element_text(angle = 45, hjust = 1),
-          panel.grid = element_blank())
+    theme_paper_tile() +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1))
 }
 ```
 

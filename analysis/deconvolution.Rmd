@@ -357,11 +357,10 @@ Scatter of `ihc_frac` (x) vs `score` (y), faceted method by lineage.
 if (!is.null(paired) && nrow(paired) > 0) {
   ggplot(paired, aes(ihc_frac, score)) +
     geom_point(alpha = 0.6, size = 1.8) +
-    geom_smooth(method = "lm", se = FALSE, colour = "steelblue", formula = y ~ x) +
+    geom_smooth(method = "lm", se = FALSE, colour = FIT_LINE, formula = y ~ x) +
     facet_grid(method ~ lineage, scales = "free") +
     labs(title = "IHC lineage fraction vs bulk-RNA deconvolution score",
-         x = "IHC fraction of all cells", y = "deconvolution score") +
-    theme_bw(base_size = 10)
+         x = "IHC fraction of all cells", y = "deconvolution score")
 }
 ```
 
@@ -416,19 +415,16 @@ if (!is.null(agr) && nrow(agr) > 0) {
   agr <- agr |> mutate(a = factor(a, levels = ord), b = factor(b, levels = ord))
 
   ggplot(agr, aes(a, b, fill = mean_rho)) +
-    geom_tile(colour = "white") +
+    geom_tile(colour = "white", linewidth = 0.3) +
     geom_text(aes(label = ifelse(is.na(mean_rho), "·", sprintf("%.2f", mean_rho))),
-              size = 3) +
-    scale_fill_gradient2(low = "#2166AC", mid = "white", high = "#B2182B",
-                         midpoint = 0, limits = c(-1, 1), name = "mean rho",
-                         na.value = "grey90") +
+              size = pt_text(6.5)) +
+    scale_fill_div(midpoint = 0, limits = c(-1, 1), name = "mean rho", guide = guide_cbar()) +
     coord_equal() +
     labs(title = "Cross-source agreement (mean Spearman across lineages)",
          subtitle = "Each deconvolution method vs every other and vs IHC; averaged over CD8T/CD4T/Treg/NK",
          x = NULL, y = NULL) +
-    theme_minimal(base_size = 11) +
-    theme(axis.text.x = element_text(angle = 40, hjust = 1),
-          panel.grid = element_blank())
+    theme_paper_tile() +
+    theme(axis.text.x = element_text(angle = 40, hjust = 1))
 }
 ```
 

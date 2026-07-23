@@ -286,10 +286,9 @@ plot_concordance <- function(df, metric, subtitle, xlab, unit_scale = TRUE) {
              label = sprintf("Pearson r = %.2f\nSpearman rho = %.2f\nKendall tau = %.2f\n(n = %d)",
                              cc$pearson, cc$spearman, cc$kendall, cc$n)) +
     labs(title = "Neoplastic cellularity: IHC vs pathologist", subtitle = subtitle,
-         x = xlab, y = "Pathologist tumour fraction", colour = "Patient") +
-    theme_classic(base_size = 12)
+         x = xlab, y = "Pathologist tumour fraction", colour = "Patient")
   if (unit_scale)
-    p <- p + geom_abline(slope = 1, linetype = "dashed", colour = "red") +
+    p <- p + geom_abline(slope = 1, linetype = "dashed", colour = REF_LINE) +
              coord_equal(xlim = c(0, 1), ylim = c(0, 1))
   p
 }
@@ -335,13 +334,12 @@ plot_bland_altman <- function(df, metric, title) {
   bias <- mean(ba$diff_val); loa <- 1.96 * sd(ba$diff_val)
   print(
     ggplot(ba, aes(mean_val, diff_val)) +
-      geom_hline(yintercept = bias, colour = "blue") +
-      geom_hline(yintercept = bias + c(-loa, loa), linetype = "dashed", colour = "grey40") +
+      geom_hline(yintercept = bias, colour = FIT_LINE) +
+      geom_hline(yintercept = bias + c(-loa, loa), linetype = "dashed", colour = REF_LINE) +
       geom_point(alpha = 0.7, size = 2) +
       labs(title = title,
            subtitle = sprintf("bias = %.3f, limits of agreement +/- %.3f", bias, loa),
-           x = "mean of the two", y = "IHC − pathologist") +
-      theme_classic(base_size = 12)
+           x = "mean of the two", y = "IHC − pathologist")
   )
 }
 
@@ -560,13 +558,12 @@ if ("hot_score" %in% names(infiltrate) &&
   st <- paired_spearman(df$cd45_over_inside, df$hot_score)
   ggplot(df, aes(cd45_over_inside, hot_score)) +
     geom_point(alpha = 0.7, size = 2) +
-    geom_smooth(method = "lm", se = FALSE, colour = "steelblue", formula = y ~ x) +
+    geom_smooth(method = "lm", se = FALSE, colour = FIT_LINE, formula = y ~ x) +
     annotate("text", x = -Inf, y = Inf, hjust = -0.1, vjust = 1.5,
              label = sprintf("Spearman rho = %.2f (p = %.3g, n = %d)",
                              st$rho, st$p, st$n)) +
     labs(title = "Immune infiltrate vs clinical HOT score",
-         x = "IHC CD45+ fraction inside tumour region", y = "clinical HOT score") +
-    theme_classic(base_size = 12)
+         x = "IHC CD45+ fraction inside tumour region", y = "clinical HOT score")
 }
 ```
 
@@ -599,7 +596,6 @@ plot_infiltrate_phenotype <- function(infiltrate, ylab, transform = identity) {
                         name = "Immuno-phenotype") +
     labs(title = "IHC infiltrate metrics by clinical immuno-phenotype",
          x = NULL, y = ylab, colour = "Immuno-phenotype") +
-    theme_classic(base_size = 11) +
     theme(axis.text.x = element_text(angle = 30, hjust = 1))
 }
 
@@ -661,7 +657,6 @@ plot_composition <- function(region_metrics, ylab, caption, transform = identity
     scale_fill_manual(values = oi, guide = "none") +
     labs(title = "IHC immune composition inside the tumour region",
          x = NULL, y = ylab, caption = caption) +
-    theme_classic(base_size = 11) +
     theme(axis.text.x = element_text(angle = 30, hjust = 1))
 }
 
@@ -750,13 +745,12 @@ if (nrow(blood_long) > 2) {
     mutate(lab = sprintf("rho = %.2f (p = %.3g, n = %d)", rho, p, n))
   ggplot(blood_long, aes(ihc_immune_score, value)) +
     geom_point(alpha = 0.7, size = 2) +
-    geom_smooth(method = "lm", se = FALSE, colour = "steelblue", formula = y ~ x) +
+    geom_smooth(method = "lm", se = FALSE, colour = FIT_LINE, formula = y ~ x) +
     geom_text(data = labs_tbl, aes(x = -Inf, y = Inf, label = lab),
               hjust = -0.05, vjust = 1.4, inherit.aes = FALSE, size = 3) +
     facet_wrap(~ blood_metric, scales = "free_y") +
     labs(title = "IHC immune score vs peripheral-blood immunity",
-         x = "IHC immune score (CD45+ fraction)", y = NULL) +
-    theme_classic(base_size = 11)
+         x = "IHC immune score (CD45+ fraction)", y = NULL)
 }
 ```
 
@@ -777,7 +771,6 @@ if ("RESPONSE" %in% names(ihc_clin)) {
       geom_jitter(width = 0.2, alpha = 0.6) +
       labs(title = "IHC immune score by induction response",
            x = NULL, y = "IHC immune score (CD45+ fraction)") +
-      theme_classic(base_size = 12) +
       theme(axis.text.x = element_text(angle = 30, hjust = 1), legend.position = "none")
   }
 }
@@ -834,14 +827,18 @@ run_survival <- function(cfg, label) {
   cat(sprintf("%s: Cox HR per unit IHC immune score = %.2f (p = %.3g, n = %d)\n",
               label, hr, pcox, nrow(d)))
   if (requireNamespace("survminer", quietly = TRUE)) {
+    # survminer defaults to its own theme_survminer (grey grid, large type), which
+    # would make these the only figures on the site off-style — force the house
+    # theme and the house categorical palette onto it.
     print(survminer::ggsurvplot(fit, data = d, pval = TRUE, risk.table = TRUE,
                                 title = paste(label, "by IHC immune score (median split)"),
-                                legend.title = "")$plot)
+                                legend.title = "", palette = unname(oi),
+                                ggtheme = theme_paper())$plot)
   } else {
-    plot(fit, col = c("firebrick", "steelblue"), xlab = "time", ylab = "survival",
+    plot(fit, col = c(oi[2], oi[1]), xlab = "time", ylab = "survival",
          main = paste(label, "by IHC immune score"))
     legend("topright", levels(factor(d$immune_group)),
-           col = c("firebrick", "steelblue"), lty = 1, bty = "n")
+           col = c(oi[2], oi[1]), lty = 1, bty = "n")
   }
 }
 

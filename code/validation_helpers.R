@@ -25,52 +25,13 @@ suppressPackageStartupMessages({
   library(sf)
 })
 
-# --- House plot style (adapted from mirage benchmarks/analysis/plots.R) ------
-# Okabe-Ito colourblind-safe categorical palette.
-oi <- c("#0072B2", "#D55E00", "#009E73", "#CC79A7",
-        "#E69F00", "#56B4E9", "#F0E442", "#000000")
-
-# Semantic colours for the immune "hot/cold" phenotype: HOT -> red, COLD -> light
-# blue, intermediate/other -> orange/grey. Robust to case/spelling. Returns a
-# named vector keyed by the given levels, for scale_colour_manual/scale_fill_manual.
-hotcold_cols <- function(levels) {
-  lv  <- as.character(levels)
-  key <- toupper(trimws(lv))
-  col <- dplyr::case_when(
-    grepl("HOT|INFLAM", key)               ~ "#D7191C",  # red
-    grepl("COLD|DESERT", key)              ~ "#74ADD1",  # light blue
-    grepl("INTERMED|VARI|MIX|EXCLUD", key) ~ "#FDAE61",  # orange
-    TRUE                                   ~ "grey65"
-  )
-  stats::setNames(col, lv)
-}
-
-# Order immune-phenotype levels cold -> intermediate -> hot (axis/legend order).
-hotcold_order <- function(x) {
-  lv   <- unique(as.character(x[!is.na(x)]))
-  key  <- toupper(trimws(lv))
-  rank <- ifelse(grepl("COLD|DESERT", key), 1L,
-          ifelse(grepl("INTERMED|VARI|MIX|EXCLUD", key), 2L,
-          ifelse(grepl("HOT|INFLAM", key), 3L, 4L)))
-  factor(x, levels = lv[order(rank)])
-}
-
-# Publication theme: generous type, restrained gridlines, bold titles, grey
-# subtitles/captions, top-left legend. Apply per-Rmd with theme_set(theme_paper).
-theme_paper <- ggplot2::theme_minimal(base_size = 12) +
-  ggplot2::theme(
-    plot.title       = ggplot2::element_text(face = "bold", size = ggplot2::rel(1.05)),
-    plot.subtitle    = ggplot2::element_text(colour = "grey35",
-                                             margin = ggplot2::margin(b = 8)),
-    plot.caption     = ggplot2::element_text(colour = "grey55",
-                                             size = ggplot2::rel(.7), hjust = 1),
-    plot.title.position = "plot", plot.caption.position = "plot",
-    axis.title       = ggplot2::element_text(colour = "grey20"),
-    panel.grid.minor = ggplot2::element_blank(),
-    panel.grid.major = ggplot2::element_line(linewidth = .3, colour = "grey90"),
-    strip.text       = ggplot2::element_text(face = "bold"),
-    legend.position  = "top", legend.justification = "left",
-    plot.margin      = ggplot2::margin(12, 16, 8, 12))
+# --- House plot style -------------------------------------------------------
+# One definition for the whole project, in code/plot_theme.R: it supplies the
+# `oi` palette, `hotcold_cols()`/`hotcold_order()`, `theme_paper()` and the
+# scale shorthands, AND applies the theme + geom defaults on source(). Sourcing
+# it here means every analysis that loads these helpers is styled automatically;
+# nothing below needs to call theme_set().
+source(here::here("code", "plot_theme.R"))
 
 # --- ID handling ------------------------------------------------------------
 # All datasets share one patient/slide ID but differ in punctuation (clinical

@@ -171,11 +171,10 @@ if (nrow(paired) > 0) {
   # log-scale expression (counts span orders of magnitude); +1 to keep zeros.
   ggplot(paired, aes(ihc_posfrac, log1p(rna_expr))) +
     geom_point(alpha = 0.6, size = 1.8) +
-    geom_smooth(method = "lm", se = FALSE, colour = "steelblue", formula = y ~ x) +
+    geom_smooth(method = "lm", se = FALSE, colour = FIT_LINE, formula = y ~ x) +
     facet_wrap(~ marker, scales = "free") +
     labs(title = "IHC marker+ fraction vs bulk-RNA expression",
-         x = "IHC fraction of cells positive", y = "log1p(bulk expression)") +
-    theme_bw(base_size = 10)
+         x = "IHC fraction of cells positive", y = "log1p(bulk expression)")
 }
 ```
 

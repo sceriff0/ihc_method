@@ -23,7 +23,8 @@ knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE,
 invisible(capture.output(suppressMessages(source(here("code", "test.R")))))
 source(here("code", "validation_helpers.R"))
 source(here("code", "pdf_export.R"))          # export_pdf_figures(): plots -> output/figures/
-theme_set(theme_paper)   # house style (mirage benchmarks)
+# House figure style (theme + palettes + geom defaults) is applied by
+# code/plot_theme.R, which validation_helpers.R sources — nothing to set here.
 CAP <- "ihc_method internal QC · FlowPath single-cell IHC"
 ```
 
@@ -81,14 +82,13 @@ conc <- mk_long |>
             pct_pos = mean(pos,  na.rm = TRUE), .groups = "drop")
 
 ggplot(conc, aes(marker, phenotype_clean, fill = mean_z)) +
-  geom_tile(colour = "white") +
-  scale_fill_gradient2(low = "#2166ac", mid = "white", high = "#b2182b",
-                       midpoint = 0, name = "mean z") +
+  geom_tile(colour = "white", linewidth = 0.3) +
+  scale_fill_div(midpoint = 0, name = "mean z", guide = guide_cbar()) +
   labs(title = "Phenotype vs marker: mean z-score",
        subtitle = "Expect each phenotype to peak on its defining marker(s); off-diagonal signal = mislabelled cells.",
        x = "marker", y = "phenotype (phenotype_clean)", caption = CAP) +
-  theme(axis.text.x = element_text(angle = 45, hjust = 1),
-        panel.grid = element_blank())
+  theme_paper_tile() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
 ```
 
 **Defining-marker check.** `expected` is a fixed table giving the defining marker
@@ -254,7 +254,7 @@ ggplot(morph, aes(reorder(phenotype_clean, value, FUN = median), value,
   geom_boxplot(outlier.shape = NA, width = .6, colour = "grey30") +
   facet_wrap(~ feature, scales = "free") +
   coord_flip() +
-  scale_fill_viridis_d(option = "D", guide = "none") +
+  scale_fill_ordinal(guide = "none") +
   labs(title = "Cell morphology by phenotype",
        subtitle = "Shapes should track cell type: tumour largest, lymphocytes small/round, stroma elongated.",
        x = NULL, y = NULL, caption = CAP)

@@ -31,20 +31,11 @@ save_fig <- function(p, name, w = 8, h = 5) {
   invisible(NULL)
 }
 
-# Publication theme: generous type, restrained gridlines, bold titles, grey subtitles.
-theme_paper <- theme_minimal(base_size = 13) +
-  theme(plot.title    = element_text(face = "bold", size = rel(1.05)),
-        plot.subtitle = element_text(colour = "grey35", margin = margin(b = 8)),
-        plot.caption  = element_text(colour = "grey55", size = rel(.7), hjust = 1),
-        plot.title.position = "plot", plot.caption.position = "plot",
-        axis.title    = element_text(colour = "grey20"),
-        panel.grid.minor = element_blank(),
-        panel.grid.major = element_line(linewidth = .3, colour = "grey90"),
-        strip.text    = element_text(face = "bold"),
-        legend.position = "top", legend.justification = "left",
-        plot.margin   = margin(12, 16, 8, 12))
-theme_set(theme_paper)
-oi <- c("#0072B2","#D55E00","#009E73","#CC79A7","#E69F00","#56B4E9","#F0E442","#000000")
+# House style. This file used to carry its own copy of the theme and the `oi`
+# palette (vendored from mirage); both now live in code/plot_theme.R so the
+# benchmark figures and the validation figures cannot drift apart. Sourcing it
+# applies theme_set() + the geom defaults and defines `oi`.
+source(here::here("code", "plot_theme.R"))
 
 m <- read_csv(file.path(adir, "measurements.csv"), show_col_types = FALSE) %>%
   mutate(proc = str_replace(process, ".*:", ""),                 # leaf process name
@@ -138,7 +129,7 @@ if (nrow(reg) > 0) {
     ggplot(aes(n_register_images, peak_rss_gb, colour = factor(target_px))) +
     geom_line() + geom_point(size = 2) +
     facet_wrap(~ n_channels, labeller = label_both) +
-    scale_colour_viridis_d(name = "size (px)", option = "C") +
+    scale_colour_ordinal(name = "size (px)") +
     labs(title = "N-image registration: peak RAM vs slide count",
          subtitle = "Co-registering more slides to one reference; coloured by image size.",
          x = "n_register_images (1 reference + N-1 moving)", y = "peak RSS (GiB)")
@@ -198,8 +189,8 @@ if (file.exists(stats_path)) {
 p7 <- m %>% filter(varied_axis %in% size_axes, n_channels == 2, n_register_images == 2) %>%
   group_by(proc, target_px) %>% summarise(peak_rss_gb = mean(peak_rss_gb), .groups = "drop") %>%
   ggplot(aes(factor(target_px), fct_reorder(proc, peak_rss_gb), fill = peak_rss_gb)) +
-  geom_tile(colour = "white") +
-  scale_fill_viridis_c(option = "B", trans = "log10", name = "peak RSS\n(GiB)") +
+  geom_tile(colour = "white", linewidth = 0.3) +
+  scale_fill_seq(transform = "log10", name = "peak RSS (GiB)", guide = guide_cbar()) +
   labs(title = "Where the memory goes",
        subtitle = "Peak RSS by stage x image size (log colour). Darker = the memory bottleneck at that size.",
        x = "image size (px)", y = NULL)
@@ -254,7 +245,8 @@ if (nrow(seg) > 0) {
     p9b <- sd %>% group_by(seg_n_tiles_x, seg_n_tiles_y) %>%
       summarise(peak_rss_gb = mean(peak_rss_gb), .groups = "drop") %>%
       ggplot(aes(factor(seg_n_tiles_x), factor(seg_n_tiles_y), fill = peak_rss_gb)) +
-      geom_tile(colour = "white") + scale_fill_viridis_c(option = "D", name = "peak RSS\n(GiB)") +
+      geom_tile(colour = "white", linewidth = 0.3) +
+      scale_fill_seq(name = "peak RSS (GiB)", guide = guide_cbar()) +
       labs(title = "StarDist tiling: peak RSS vs tile grid", x = "seg_n_tiles_x", y = "seg_n_tiles_y")
     save_fig(p9b, "09b_stardist_tile_grid", 6, 5)
   }

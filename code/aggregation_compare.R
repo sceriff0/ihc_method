@@ -284,10 +284,10 @@ plot_aggregation_grid <- function(pairs, which_metric, title = NULL) {
     geom_rect(data = dplyr::filter(rho, matched),
               xmin = -Inf, xmax = Inf, ymin = -Inf, ymax = Inf,
               fill = "grey92", inherit.aes = FALSE) +
-    geom_abline(slope = 1, linetype = "dashed", colour = "red") +
-    geom_point(aes(colour = patient_id), alpha = 0.8, size = 2) +
+    geom_abline(slope = 1, linetype = "dashed", colour = "grey35") +
+    geom_point(aes(colour = patient_id), alpha = 0.8, size = 1.2) +
     geom_text(data = rho, aes(x = -Inf, y = Inf, label = lab),
-              hjust = -0.05, vjust = 1.3, size = 2.7, inherit.aes = FALSE) +
+              hjust = -0.05, vjust = 1.3, size = pt_text(6), inherit.aes = FALSE) +
     facet_grid(ihc_lab ~ path_lab, labeller = label_wrap_gen(18)) +
     coord_equal(xlim = c(0, 1), ylim = c(0, 1)) +
     labs(title = title %||% paste0("Aggregation sensitivity: ", which_metric),
@@ -296,7 +296,9 @@ plot_aggregation_grid <- function(pairs, which_metric, title = NULL) {
          x = "IHC tumour fraction (aggregated per patient)",
          y = "Pathologist tumour fraction (aggregated per patient)",
          colour = "Patient") +
-    theme_classic(base_size = 10) +
+    # House theme comes from theme_set() in plot_theme.R; only the deviation is
+    # named here (horizontal right-hand strip labels, which a 6x4 facet_grid needs
+    # to stay readable).
     theme(strip.text.y = element_text(angle = 0))
 }
 
@@ -308,22 +310,23 @@ plot_aggregation_heatmap <- function(stats, stat = "spearman") {
   if (nrow(stats) == 0) return(invisible())
   d <- dplyr::mutate(stats, value = .data[[stat]])
   ggplot(d, aes(path_lab, ihc_lab, fill = value)) +
-    geom_tile(colour = "white", linewidth = 0.6) +
+    geom_tile(colour = "white", linewidth = 0.4) +
     # Ring the matched-weighting cells so they read as the reference points.
     geom_tile(data = dplyr::filter(d, matched),
-              colour = "black", linewidth = 0.9, fill = NA) +
+              colour = "black", linewidth = 0.6, fill = NA) +
     geom_text(aes(label = ifelse(is.finite(value), sprintf("%.2f\n(n=%d)", value, n), "—")),
-              size = 3) +
+              size = pt_text(6.5), lineheight = 0.9) +
     facet_wrap(~ metric, ncol = 1) +
-    scale_fill_gradient2(low = "#B2182B", mid = "white", high = "#2166AC",
-                         midpoint = 0, limits = c(-1, 1), na.value = "grey90",
-                         name = stat) +
+    # House diverging ramp: blue = low, red = high. This used to be inverted here
+    # (red = -1) while every other diverging figure in the project ran blue-to-red,
+    # so the same colour meant opposite things across the site. Sign now reads the
+    # same way everywhere.
+    scale_fill_div(midpoint = 0, limits = c(-1, 1), name = stat, guide = guide_cbar()) +
     labs(title = paste0("Aggregation sensitivity of the IHC-vs-pathologist ", stat),
          subtitle = "boxed cells weight both sides the same way",
          x = "pathologist aggregator", y = "IHC aggregator") +
-    theme_minimal(base_size = 10) +
-    theme(axis.text.x = element_text(angle = 30, hjust = 1),
-          panel.grid = element_blank())
+    theme_paper_tile() +
+    theme(axis.text.x = element_text(angle = 30, hjust = 1))
 }
 
 # How far apart the aggregators put a single patient: per patient, the spread

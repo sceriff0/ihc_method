@@ -16,3 +16,8 @@ data/*
 AGENTS.md
 CLAUDE.md
 specs/
+
+# Reference figures dropped at the repo root for style matching (not project output)
+/*.png
+/*.tif
+/*.tiff
